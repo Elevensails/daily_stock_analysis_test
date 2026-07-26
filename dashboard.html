@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<meta http-equiv="refresh" content="30">
+<title>A股实时盯盘 · 30秒刷新</title>
+<style>
+:root{--accent:#1e40af;--bg:#f5f7fa;--card:#fff;--mut:#64748b;--red:#dc2626;--green:#16a34a;--line:#e5e7eb}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;font-size:15px;line-height:1.7;color:#1f2937}
+.wrap{max-width:1080px;margin:0 auto;padding:0 20px 60px}
+.back{position:sticky;top:0;z-index:100;background:rgba(255,255,255,.95);backdrop-filter:blur(8px);padding:10px 20px;border-bottom:1px solid var(--line);margin:0 -20px 16px}
+.back a{display:inline-flex;align-items:center;gap:6px;background:linear-gradient(135deg,#1e3a5f,#1e40af);color:#fff;text-decoration:none;border-radius:8px;padding:8px 16px;font-size:13px;font-weight:600}
+header{background:linear-gradient(135deg,#1e3a5f,#1e40af);color:#fff;padding:20px 0 16px}
+header h1{margin:0 0 4px;font-size:22px}
+#ts{font-size:12px;opacity:.85}
+.module{background:var(--card);border-radius:14px;padding:16px 18px;margin:12px 0;box-shadow:0 2px 10px rgba(30,64,175,.06)}
+.module h2{font-size:16px;margin:0 0 10px;color:var(--accent);border-left:4px solid var(--accent);padding-left:8px}
+.idx-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
+.idx-card{background:#f8fafc;border:1px solid var(--line);border-radius:9px;padding:10px 12px}
+.idx-card .n{font-size:12px;color:var(--mut)}
+.idx-card .p{font-size:18px;font-weight:700;font-variant-numeric:tabular-nums}
+.idx-card .c{font-size:13px;font-weight:600}
+.hold-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px}
+.hold-card{background:#f8fafc;border:1px solid var(--line);border-radius:9px;padding:12px 14px}
+.hold-card .hn{font-weight:700;font-size:14px;color:var(--accent)}
+.hold-card .hp{font-size:20px;font-weight:700;font-variant-numeric:tabular-nums;margin:4px 0}
+.hold-card .hm{font-size:12px;color:var(--mut)}
+.bar{display:flex;align-items:center;gap:8px;margin:4px 0;font-size:13px}
+.bn{width:80px;flex:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bbar{flex:1 1 auto;height:14px;background:#f1f5f9;border-radius:7px;overflow:hidden;min-width:0}
+.bt{display:block;height:100%;border-radius:7px}
+.bv{width:70px;flex:none;text-align:right;font-variant-numeric:tabular-nums}
+.empty{color:var(--mut);font-size:14px}
+footer{margin-top:24px;color:var(--mut);font-size:12px;text-align:center;border-top:1px solid var(--line);padding-top:12px}
+.up{color:var(--red)}.dn{color:var(--green)}
+</style>
+</head>
+<body>
+<div class="back"><a href="index.html">← 返回首页</a></div>
+<header><div class="wrap"><h1>⚡ A股实时盯盘</h1><div id="ts">加载中...</div></div></header>
+<div class="wrap">
+<div class="module"><h2>📈 指数实时</h2><div class="idx-grid" id="idx-grid">加载中...</div></div>
+<div class="module"><h2>💼 持仓快照</h2><div class="hold-grid" id="hold-grid">加载中...</div></div>
+<div class="module"><h2>🔥 板块涨幅 Top</h2><div id="sector-top">加载中...</div></div>
+<div class="module"><h2>💰 主力净流入 Top</h2><div id="inflow-top">加载中...</div></div>
+<footer>数据源: 东方财富 · 30秒自动刷新 · 以上分析基于公开数据，不构成投资建议</footer>
+</div>
+<script>
+var STOCKS={'600036':'招商银行','159915':'创业板ETF','002049':'紫光国微','603823':'百合花','510050':'上证50ETF','512400':'有色ETF'};
+function pad(n){return n<10?'0'+n:''+n}
+function ts(){var d=new Date();return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate())+' '+pad(d.getHours())+':'+pad(d.getMinutes())+':'+pad(d.getSeconds())}
+function fetchJSON(url,cb){var x=new XMLHttpRequest();x.open('GET',url,true);x.onreadystatechange=function(){if(x.readyState==4&&x.status==200){try{cb(JSON.parse(x.responseText))}catch(e){}}};x.send()}
+function fetchQuote(){
+  var codes=Object.keys(STOCKS).map(function(c){return (c.startsWith('6')?'1':'0')+'.'+c}).join(',');
+  fetchJSON('https://push2.eastmoney.com/api/qt/ulist.np/get?fields=f2,f3,f4,f12,f14&secids='+codes,function(d){
+    var html='';
+    (d.data&&d.data.diff||[]).forEach(function(it){
+      var chg=it.f3;var col=chg>=0?'up':'dn';var sign=chg>=0?'+':'';
+      html+='<div class="hold-card"><div class="hn">'+it.f14+' ('+it.f12+')</div><div class="hp '+col+'">'+it.f2.toFixed(2)+'</div><div class="hm">'+sign+chg.toFixed(2)+'%</div></div>';
+    });
+    document.getElementById('hold-grid').innerHTML=html||'<div class="empty">数据加载失败</div>';
+  });
+  var idxCodes='1.000001,0.399001,0.399006';
+  fetchJSON('https://push2.eastmoney.com/api/qt/ulist.np/get?fields=f2,f3,f4,f12,f14&secids='+idxCodes,function(d){
+    var html='';
+    (d.data&&d.data.diff||[]).forEach(function(it){
+      var chg=it.f3;var col=chg>=0?'up':'dn';var sign=chg>=0?'+':'';
+      html+='<div class="idx-card"><div class="n">'+it.f14+'</div><div class="p '+col+'">'+it.f2.toFixed(2)+'</div><div class="c '+col+'">'+sign+chg.toFixed(2)+'%</div></div>';
+    });
+    document.getElementById('idx-grid').innerHTML=html||'<div class="empty">数据加载失败</div>';
+  });
+  fetchJSON('https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=8&po=1&np=1&fields=f2,f3,f12,f14&fid=f3&fs=m:90+t:2',function(d){
+    var html='';var max=0;
+    var items=(d.data&&d.data.diff||[]);
+    items.forEach(function(it){if(Math.abs(it.f3)>max)max=Math.abs(it.f3)});
+    items.forEach(function(it){
+      var w=max>0?Math.abs(it.f3)/max*100:0;var col=it.f3>=0?'up':'dn';
+      html+='<div class="bar"><span class="bn">'+it.f14+'</span><span class="bbar"><span class="bt" style="width:'+w.toFixed(0)+'%;background:'+(it.f3>=0?'#dc2626':'#16a34a')+'"></span></span><span class="bv '+col+'">'+(it.f3>=0?'+':'')+it.f3.toFixed(2)+'%</span></div>';
+    });
+    document.getElementById('sector-top').innerHTML=html||'<div class="empty">数据加载失败</div>';
+  });
+  fetchJSON('https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=8&po=1&np=1&fields=f12,f14,f62&fid=f62&fs=m:90+t:2',function(d){
+    var html='';var max=0;
+    var items=(d.data&&d.data.diff||[]);
+    items.forEach(function(it){if(Math.abs(it.f62)>max)max=Math.abs(it.f62)});
+    items.forEach(function(it){
+      var w=max>0?Math.abs(it.f62)/max*100:0;var v=it.f62/1e8;var col=v>=0?'up':'dn';
+      html+='<div class="bar"><span class="bn">'+it.f14+'</span><span class="bbar"><span class="bt" style="width:'+w.toFixed(0)+'%;background:'+(v>=0?'#dc2626':'#16a34a')+'"></span></span><span class="bv '+col+'">'+(v>=0?'+':'')+v.toFixed(2)+'亿</span></div>';
+    });
+    document.getElementById('inflow-top').innerHTML=html||'<div class="empty">数据加载失败</div>';
+  });
+  document.getElementById('ts').textContent='更新时间: '+ts()+' · 30秒后自动刷新';
+}
+fetchQuote();
+setInterval(fetchQuote,30000);
+</script>
+</body>
+</html>

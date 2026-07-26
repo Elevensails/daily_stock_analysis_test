@@ -1,0 +1,38 @@
+name: Vibe-Trading Quant Analysis
+
+on:
+  workflow_dispatch:
+    inputs:
+      time_slot:
+        description: target time slot HHMM
+        required: false
+        default: ""
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Compute time slot
+        run: |
+          TSLOT="${{ inputs.time_slot }}"
+          if [ -z "$TSLOT" ]; then
+            TSLOT=$(python3 -c "from datetime import datetime,timezone,timedelta;print(datetime.now(timezone(timedelta(hours=8))).strftime('%H%M'))")
+          fi
+          echo "TSLOT=$TSLOT" >> $GITHUB_ENV
+      - name: Run Vibe-Trading analysis
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          TIME_SLOT: ${{ env.TSLOT }}
+        run: python3 scripts/run_vibe.py
+      - name: Deploy to GH Pages
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/deploy_pages.py
