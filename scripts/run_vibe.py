@@ -38,7 +38,15 @@ from datetime import datetime, timezone, timedelta
 # --------------------------------------------------------------------------- #
 # Configuration
 # --------------------------------------------------------------------------- #
-VIBE_TIMEOUT_SECONDS = 600  # hard ceiling for a single vibe run
+VIBE_TIMEOUT_SECONDS = 1200  # hard ceiling for a single vibe run; raised from 600
+# because a 4-symbol deep analysis at --max-iter 200 frequently needs >600s
+# (observed 330s on a fast trajectory, >600s on a heavier one).
+# Agent iterations needed to finish a 4-symbol deep analysis (data fetch +
+# indicator computation per symbol). The upstream default (~50) is too low and
+# makes the run end with "reached max iterations without final answer", so
+# run_vibe.py would only ever emit the empty skeleton. Bumped after a real
+# validation run proved 200 iterations completes a full structured report.
+VIBE_MAX_ITER = 200
 HOLDINGS = [
     ("600036", "招商银行"),
     ("159915", "创业板ETF"),
@@ -99,7 +107,15 @@ def _run_vibe_cli(prompt: str) -> "tuple[int, str, str]":
     safe). stdin is DEVNULL and the process runs in its own session so a hang
     can be killed by the timeout.
     """
-    base_args = ["run", "-p", prompt, "--json", "--no-rich"]
+    base_args = [
+        "run",
+        "-p",
+        prompt,
+        "--json",
+        "--no-rich",
+        "--max-iter",
+        str(VIBE_MAX_ITER),
+    ]
     # Prefer the console script; fall back to `python -m cli`.
     candidates = [
         ["vibe-trading", *base_args],
@@ -192,8 +208,12 @@ def _split_sections_by_symbol(raw_md: str) -> "dict[str, str]":
     anchors = [re.escape(code) for code, _ in HOLDINGS] + [
         re.escape(name) for _, name in HOLDINGS
     ]
+    # Heading line that CONTAINS any holding code/name anywhere after the '#'
+    # markers. Allowing `.*?` between '#' and the anchor tolerates prefixes the
+    # agent emits (e.g. "## 一、600036.SH 招商银行"); dropping the `[*#\-]*`
+    # alternative avoids false matches on bulleted list items.
     pattern = re.compile(
-        r"^[ \t]*(#{1,6}[ \t]*|[*#\-]*[ \t]*)(" + "|".join(anchors) + r")",
+        r"^[ \t]*#{1,6}[ \t]*.*?(" + "|".join(anchors) + r")",
         re.MULTILINE,
     )
     matches = list(pattern.finditer(raw_md))
@@ -222,7 +242,12 @@ def _split_sections_by_symbol(raw_md: str) -> "dict[str, str]":
 
 
 def _extract_subsection(block: str, keywords: "tuple[str, ...]") -> str:
-    """Pull the lines under the first heading matching any keyword."""
+    """Pull the lines under the FIRST heading matching any keyword, then stop.
+
+    Only the first matching subsection is taken (we break as soon as its body
+    ends on the next heading) so that a per-symbol block never leaks another
+    symbol's same-named subsection into this one.
+    """
     lines = block.splitlines()
     captured: list[str] = []
     active = False
@@ -232,7 +257,9 @@ def _extract_subsection(block: str, keywords: "tuple[str, ...]") -> str:
             if any(kw in stripped for kw in keywords):
                 active = True
                 continue
-            # A new, unrelated heading ends the captured subsection.
+            # A heading ends the (first) captured subsection -> stop entirely.
+            if active:
+                break
             active = False
             continue
         if active:
@@ -265,11 +292,6 @@ def _structure_report(raw_md: str) -> str:
             out_parts.append(f"### {title}")
             out_parts.append(sub if sub else "（未在报告中提供）")
             out_parts.append("")
-        # If we fell back to the combined block, avoid duplicating for every symbol.
-        if "__all__" in blocks and code != HOLDINGS[0][0]:
-            # Only the first symbol should carry the combined block content.
-            out_parts = out_parts[: out_parts.index(f"## {code} {name}")]
-            break
     return "\n".join(out_parts).strip() + "\n"
 
 
