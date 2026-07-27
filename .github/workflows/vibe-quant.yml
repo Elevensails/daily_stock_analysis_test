@@ -32,6 +32,8 @@ jobs:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           TIME_SLOT: ${{ env.TSLOT }}
         run: python3 scripts/run_vibe.py
+      - name: XSS render gate
+        run: python3 -m pytest tests/test_xss_escape.py -q
       - name: Deploy to GH Pages
         env:
           GITHUB_TOKEN: ${{ github.token }}

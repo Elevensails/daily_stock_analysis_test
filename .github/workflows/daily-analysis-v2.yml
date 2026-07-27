@@ -39,6 +39,8 @@ jobs:
         env:
           TIME_SLOT: ${{ inputs.time_slot }}
         run: python3 scripts/rename_reports.py
+      - name: XSS render gate
+        run: python3 -m pytest tests/test_xss_escape.py -q
       - name: Deploy to GH Pages
         env:
           GITHUB_TOKEN: ${{ github.token }}

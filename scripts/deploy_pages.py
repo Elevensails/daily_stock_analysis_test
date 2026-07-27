@@ -5,11 +5,14 @@ from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 
 TOKEN = os.environ.get('GITHUB_TOKEN', '')
-if not TOKEN:
-    print('FATAL: GITHUB_TOKEN is empty!')
-    raise SystemExit(1)
-print(f'GITHUB_TOKEN: {len(TOKEN)} chars (prefix: {TOKEN[:4]}...)')
-API = 'https://api.github.com/repos/Elevensails/daily_stock_analysis/contents'
+# import 守卫：仅作为脚本直接运行时才校验 token，避免 offline 单元测试在
+# import deploy_pages 时因缺少 GITHUB_TOKEN 直接 SystemExit 而无法加载。
+if __name__ == '__main__':
+    if not TOKEN:
+        print('FATAL: GITHUB_TOKEN is empty!')
+        raise SystemExit(1)
+    print(f'GITHUB_TOKEN: {len(TOKEN)} chars (prefix: {TOKEN[:4]}...)')
+API = 'https://api.github.com/repos/Elevensails/daily_stock_analysis_test/contents'
 BRANCH = 'gh-pages'
 HEADERS = {'Authorization': f'Bearer {TOKEN}', 'Content-Type': 'application/json'}
 
@@ -118,31 +121,41 @@ footer a{color:var(--accent);text-decoration:none}
 
 # ====== MD TO HTML ======
 def md2html(md):
+    """将模型生成的 Markdown 报告转为 HTML 片段。
+
+    XSS 安全：所有来自模型/外部的文本节点（表格单元格、标题、引用、列表、段落）
+    均先经 ``html.escape`` 再 f-string 注入；仅我方代码生成的标签（<strong>/<td>/
+    <th>/<table> 等）不 escape。``html.escape`` 仅转义 ``< > & " '``，不影响 markdown
+    强调（``**bold**`` 的 ``*`` 不被转义）。段落行必须先 escape 原始文本、再做
+    ``** -> <strong>`` 替换，否则我方生成的 ``<strong>`` 会被反向破坏。
+    """
     lines = md.split('\n')
     out = []; in_table = False; in_stock = False
     for line in lines:
         if line.startswith('|'):
             cells = [c.strip() for c in line.split('|')[1:-1]]
             if not in_table:
-                out.append('<div style="overflow-x:auto"><table class="tbl"><thead><tr>'+''.join(f'<th>{c}</th>' for c in cells)+'</tr></thead><tbody>')
+                out.append('<div style="overflow-x:auto"><table class="tbl"><thead><tr>'+''.join(f'<th>{html.escape(c)}</th>' for c in cells)+'</tr></thead><tbody>')
                 in_table = True; continue
             if all(c.replace('-','').replace(':','')=='' for c in cells): continue
-            out.append('<tr>'+''.join(f'<td>{c}</td>' for c in cells)+'</tr>')
+            out.append('<tr>'+''.join(f'<td>{html.escape(c)}</td>' for c in cells)+'</tr>')
         else:
             if in_table: out.append('</tbody></table></div>'); in_table = False
             if line.startswith('## ') and not line.startswith('### '):
                 # Stock section: wrap in styled card
                 if in_stock: out.append('</div></div>')
                 stock_title = line[3:].strip()
-                out.append(f'<div class="stock-section"><h2>{stock_title}</h2><div class="stock-body">')
+                out.append(f'<div class="stock-section"><h2>{html.escape(stock_title)}</h2><div class="stock-body">')
                 in_stock = True
-            elif line.startswith('# '): out.append(f'<h1>{line[2:]}</h1>')
-            elif line.startswith('### '): out.append(f'<h3>{line[4:]}</h3>')
-            elif line.startswith('> '): out.append(f'<blockquote>{line[2:]}</blockquote>')
-            elif line.startswith('- ') or line.startswith('* '): out.append(f'<li>{line[2:]}</li>')
+            elif line.startswith('# '): out.append(f'<h1>{html.escape(line[2:])}</h1>')
+            elif line.startswith('### '): out.append(f'<h3>{html.escape(line[4:])}</h3>')
+            elif line.startswith('> '): out.append(f'<blockquote>{html.escape(line[2:])}</blockquote>')
+            elif line.startswith('- ') or line.startswith('* '): out.append(f'<li>{html.escape(line[2:])}</li>')
             elif line.strip() == '---': out.append('<hr>')
             elif line.strip():
-                line2 = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', line)
+                # 先转义原始模型文本，再对转义结果做 ** -> <strong> 替换。
+                safe_line = html.escape(line)
+                line2 = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', safe_line)
                 out.append(f'<p>{line2}</p>')
     if in_table: out.append('</tbody></table></div>')
     if in_stock: out.append('</div></div>')
@@ -238,14 +251,25 @@ def extract_preview(html_text, max_len=90):
     return cut.rstrip() + '…'
 
 # ====== PAGE GENERATORS ======
-def make_report_page(md_file, html_name, now_ts):
-    with open(md_file, 'r', encoding='utf-8') as f: md = f.read()
-    title = md.split('\n')[0].replace('# ','').strip()
+def build_report_html(md, title, now_ts):
+    """把 Markdown 报告内容拼装为完整 HTML 页面（纯函数，无 I/O）。
+
+    仅做 HTML 拼装，不触发 ``gh_get_sha`` / ``gh_put``，便于离线测试。所有来自
+    模型/外部的文本（``title``、md2html 渲染出的 body）均已先 html.escape 再注入；
+    我方生成的标签（<strong>/<td> 等）与常量不 escape。
+    """
+    safe_title = html.escape(title)
     body = md2html(md)
-    html = f'''<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>{title}</title>{BASE_CSS}</head>
+    return f'''<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>{safe_title}</title>{BASE_CSS}</head>
 <body><div class="nav"><a href="index.html">&#127968; 首页</a><span class="sep">/</span><a href="archive.html">&#128451; 历史</a><span class="sep">/</span><a href="javascript:history.back()" class="ghost">&#8592; 返回</a></div>
 <div class="wrap"><div class="module">{body}</div>
 <footer>{now_ts} · DeepSeek AI · 以上分析基于公开数据，不构成投资建议</footer></div></body></html>'''
+
+
+def make_report_page(md_file, html_name, now_ts):
+    with open(md_file, 'r', encoding='utf-8') as f: md = f.read()
+    title = md.split('\n')[0].replace('# ','').strip()
+    html = build_report_html(md, title, now_ts)
     sha = gh_get_sha(html_name)
     return gh_put(html_name, html, sha)
 

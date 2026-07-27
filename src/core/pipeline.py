@@ -577,6 +577,7 @@ class StockAnalysisPipeline:
                     daily_market_context=daily_market_context,
                     portfolio_context=portfolio_context,
                     market_structure_context=market_structure_context,
+                    previous_slot_stock_conclusions=previous_slot_stock_conclusions,
                 )
 
             # Step 4: 多维度情报搜索（最新消息+风险排查+业绩预期）
@@ -1291,6 +1292,63 @@ class StockAnalysisPipeline:
         except Exception as e:
             logger.warning("[%s] Agent history prefetch failed: %s", code, e)
 
+    def _build_agent_continuity_section(
+        self,
+        code: str,
+        previous_slot_stock_conclusions: Optional[Dict[str, Any]],
+        report_language: str,
+    ) -> Optional[str]:
+        """Render the previous-slot per-stock conclusion for the agent path.
+
+        Mirrors the legacy ``analyze_stock`` injection of
+        ``enhanced_context["previous_slot_stock_conclusions"]`` (which feeds the
+        ``analyzer`` prompt). The agent path cannot forward the *raw dict* into
+        ``initial_context`` the same way — the agent executor expects a
+        pre-rendered prompt section (see ``AgentExecutor._build_user_message``);
+        instead we pre-render it to a bounded string and store it under the same
+        key ``previous_slot_stock_conclusions`` so legacy and agent align (key
+        name identical; value form differs: dict vs pre-rendered string).
+
+        Fail-soft (consistent with L460 realtime-quote degradation and L531
+        snapshot-write failure): any error while looking up or rendering the
+        conclusion is logged as ``[WARN] continuity fallback: ...`` and ``None``
+        is returned so the single-stock analysis continues with an *empty*
+        continuity segment — never silently dropped, never interrupts the stock.
+        This method must not raise.
+
+        Args:
+            code: the stock code currently being analyzed.
+            previous_slot_stock_conclusions: the orchestration-loaded dict
+                ``{code: StockSlotConclusion | Mapping | None}``; ``None`` or a
+                non-dict means "no continuity" and yields ``None``.
+            report_language: normalized report language (zh/en/ko).
+
+        Returns:
+            The rendered prompt section (bounded string) when a usable conclusion
+            exists, or ``None`` when there is no prior conclusion or rendering
+            failed (degraded).
+        """
+        if not isinstance(previous_slot_stock_conclusions, dict):
+            return None
+        conclusion = previous_slot_stock_conclusions.get(code)
+        if conclusion is None:
+            return None
+        try:
+            section = format_previous_slot_stock_conclusions_prompt_section(
+                {code: conclusion},
+                report_language=report_language,
+            )
+            if not section:
+                return None
+            return section
+        except Exception as exc:  # fail-soft: never break single-stock analysis
+            logger.warning(
+                "[WARN] continuity fallback: 渲染上一时段个股结论失败 code=%s err=%s",
+                code,
+                exc,
+            )
+            return None
+
     def _analyze_with_agent(
         self, 
         code: str, 
@@ -1307,9 +1365,45 @@ class StockAnalysisPipeline:
         daily_market_context: Optional[DailyMarketContext] = None,
         portfolio_context: Optional[Dict[str, Any]] = None,
         market_structure_context: Optional[Dict[str, Any]] = None,
+        previous_slot_stock_conclusions: Optional[Dict[str, Any]] = None,
     ) -> Optional[AnalysisResult]:
-        """
-        使用 Agent 模式分析单只股票。
+        """使用 Agent 模式分析单只股票（含上一时段个股连续性注入）。
+
+        该函数将编排层一次性加载的跨时段个股结论
+        （``previous_slot_stock_conclusions``，键为股票代码、值为
+        ``StockSlotConclusion`` / 映射 / ``None``）注入到本轮 agent 分析的 prompt
+        中，与 legacy 路径（``analyze_stock`` 把原始 dict 挂入
+        ``enhanced_context["previous_slot_stock_conclusions"]``，由 ``analyzer``
+        渲染）在连续性注入上对齐——两条路径共用同一键名
+        ``previous_slot_stock_conclusions``，但 agent 路径在本函数内**预渲染为已
+        渲染的 prompt 段落字符串**后注入 ``initial_context``（legacy 注入的是原始
+        dict），最终由 ``AgentExecutor._build_user_message`` 直接并入 user message
+        prompt。
+
+        连续性注入的 fail-soft 语义（与 L460 实时行情降级、L531 快照写失败风格一致）：
+        - 字典缺失、单标的无历史（值为 ``None``）时，不注入、不报错、不中断分析；
+        - 渲染（取值/格式化）异常时，记录
+          ``logger.warning("[WARN] continuity fallback: ...")`` 并继续以空结论段分析，
+          **绝不静默丢空、绝不中断单只股票分析**；
+        - 模型调用级异常仍按既有逻辑 ``raise``（不在 fail-soft 范围内）。
+
+        Args:
+            code: 股票代码。
+            report_type: 报告类型。
+            query_id: 查询链路关联 id。
+            stock_name: 股票名称。
+            realtime_quote: 实时行情对象（可空）。
+            chip_data: 筹码分布对象（可空）。
+            fundamental_context: 基本面上下文字典（可选）。
+            trend_result: 趋势分析结果（可选）。
+            market_phase_context: 市场阶段上下文（可选）。
+            market_phase_summary: 市场阶段摘要（可选）。
+            daily_market_context: 当日大盘上下文（可选）。
+            portfolio_context: 持仓上下文（可选）。
+            market_structure_context: 市场结构上下文（可选）。
+            previous_slot_stock_conclusions: 编排层加载的跨时段个股结论字典
+                ``{code: StockSlotConclusion | Mapping | None}``，由
+                ``load_previous_slot_stock_conclusions`` 提供；``None`` 表示不注入。
         """
         try:
             from src.agent.factory import build_agent_executor
@@ -1381,6 +1475,17 @@ class StockAnalysisPipeline:
                     else persisted_intelligence_context
                 )
                 logger.info(f"[{code}] Agent mode: local intelligence evidence injected into news_context")
+
+            # T01/U1 连续性注入（agent 路径）：将上一时段个股结论预渲染为 prompt 段落，
+            # 写入 initial_context，键名与 legacy 对齐；fail-soft（异常仅告警并继续）。
+            if previous_slot_stock_conclusions is not None:
+                continuity_section = self._build_agent_continuity_section(
+                    code=code,
+                    previous_slot_stock_conclusions=previous_slot_stock_conclusions,
+                    report_language=report_language,
+                )
+                if continuity_section:
+                    initial_context["previous_slot_stock_conclusions"] = continuity_section
 
             # Issue #1066: ensure deep history is in DB before agent tools run
             self._ensure_agent_history(code)

@@ -890,6 +890,12 @@ class AgentExecutor:
             if market_structure_section:
                 parts.append(market_structure_section)
 
+            # 连续性（T01/U1）：把上一时段个股结论段并入 prompt，键名与 legacy 对齐。
+            # pipeline 已预渲染为受限 prompt 段落字符串（initial_context 中该键为字符串）。
+            previous_slot_section = context.get("previous_slot_stock_conclusions")
+            if isinstance(previous_slot_section, str) and previous_slot_section:
+                parts.append(previous_slot_section)
+
             analysis_context_pack_summary = context.get("analysis_context_pack_summary")
             if isinstance(analysis_context_pack_summary, str) and analysis_context_pack_summary:
                 parts.append(analysis_context_pack_summary)
