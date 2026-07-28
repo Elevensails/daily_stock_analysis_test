@@ -1,0 +1,117 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>A股智能分析 · 决策仪表盘</title><style>
+:root {
+  --pri: #1e3a5f; --pri-lt: #1e40af; --accent: #2563eb;
+  --bg: #f0f4f8; --card: #fff; --card-hover: #f8fafc;
+  --text: #1e293b; --text-mut: #64748b; --text-dim: #94a3b8;
+  --border: #e2e8f0; --border-focus: #93c5fd;
+  --green: #16a34a; --green-bg: #dcfce7;
+  --red: #dc2626; --red-bg: #fee2e2;
+  --amber: #d97706; --amber-bg: #fef3c7;
+  --purple: #7c3aed; --purple-bg: #f3e8ff;
+  --radius: 12px; --radius-sm: 8px;
+  --shadow: 0 1px 3px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04);
+  --shadow-lg: 0 4px 16px rgba(0,0,0,.08);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);font-family:-apple-system,"PingFang SC","Microsoft YaHei","Noto Sans SC",sans-serif;font-size:15px;line-height:1.75;color:var(--text);-webkit-font-smoothing:antialiased}
+.wrap{max-width:960px;margin:0 auto;padding:0 20px 60px}
+
+/* Navigation */
+.nav{position:sticky;top:0;z-index:100;background:rgba(255,255,255,.92);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-bottom:1px solid var(--border);padding:12px 20px;display:flex;gap:8px;align-items:center;margin:0 -20px 24px}
+.nav a,.nav span{display:inline-flex;align-items:center;gap:5px;padding:6px 14px;border-radius:var(--radius-sm);font-size:13px;font-weight:500;text-decoration:none;transition:all .15s}
+.nav a{background:var(--pri);color:#fff}
+.nav a:hover{background:var(--pri-lt);transform:translateY(-1px)}
+.nav a.ghost{background:transparent;color:var(--pri);border:1px solid var(--border)}
+.nav a.ghost:hover{background:var(--card-hover)}
+.nav .sep{color:var(--text-dim);font-size:14px;padding:0 2px}
+
+/* Cards */
+.card{display:block;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:20px 24px;margin:14px 0;text-decoration:none;color:inherit;transition:all .2s;box-shadow:var(--shadow)}
+.card:hover{transform:translateY(-2px);box-shadow:var(--shadow-lg);border-color:var(--border-focus)}
+.card .card-title{font-size:17px;font-weight:700;color:var(--pri);margin-bottom:4px}
+.card .card-desc{font-size:13px;color:var(--text-mut);line-height:1.6}
+.card.pending{opacity:.45;pointer-events:none}
+.card.stock{border-left:4px solid var(--accent)}
+.card.market{border-left:4px solid #0d9488}
+.card.quant{border-left:4px solid var(--purple);background:linear-gradient(135deg,var(--purple-bg),#fff)}
+.card.live{border-left:4px solid var(--amber);background:linear-gradient(135deg,var(--amber-bg),#fff)}
+.card.archive{border-left:4px solid var(--text-dim)}
+
+.badge{display:inline-block;color:#fff;padding:2px 10px;border-radius:20px;font-size:11px;font-weight:600;margin-left:8px;vertical-align:middle}
+.badge-ok{background:var(--green)}
+.badge-pending{background:var(--text-dim)}
+
+/* Header */
+.hero{background:linear-gradient(135deg,var(--pri),var(--pri-lt));color:#fff;padding:28px 24px;border-radius:var(--radius);margin-bottom:24px;text-align:center;box-shadow:var(--shadow-lg)}
+.hero h1{font-size:24px;margin-bottom:6px;letter-spacing:-.3px}
+.hero .meta{opacity:.88;font-size:13px;margin-top:8px}
+.stats{display:flex;gap:10px;justify-content:center;margin-top:12px;flex-wrap:wrap}
+.stats span{background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.25);border-radius:20px;padding:3px 14px;font-size:12px;white-space:nowrap}
+
+/* Section */
+.section-title{font-size:14px;font-weight:700;color:var(--text-mut);margin:28px 0 12px;padding-bottom:8px;border-bottom:2px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+.section-title .count{font-size:12px;font-weight:500;color:var(--text-dim)}
+
+/* Report Content */
+.module{background:var(--card);border-radius:var(--radius);padding:24px 28px;margin:16px 0;box-shadow:var(--shadow)}
+.module h1{font-size:22px;margin:0 0 20px;color:var(--pri);padding-bottom:12px;border-bottom:2px solid var(--border)}
+.module h2{font-size:18px;margin:28px 0 14px;padding:10px 0 10px 14px;border-left:4px solid var(--accent);background:linear-gradient(90deg,#eff6ff,transparent);border-radius:0 var(--radius-sm) var(--radius-sm) 0;color:var(--pri)}
+.module h3{font-size:15px;margin:20px 0 10px;color:var(--text);font-weight:700}
+.module p{font-size:14px;line-height:1.8;color:var(--text);margin:0 0 10px}
+.module blockquote{border-left:4px solid var(--accent);background:#eff6ff;padding:12px 16px;margin:12px 0;border-radius:0 var(--radius-sm) var(--radius-sm) 0;font-size:14px;color:var(--pri)}
+.module li{font-size:14px;line-height:1.8;color:var(--text);margin:3px 0;padding-left:4px}
+.module li::marker{color:var(--accent)}
+.module hr{border:none;border-top:1px solid var(--border);margin:20px 0}
+.module strong{color:var(--pri);font-weight:700}
+.module code{background:#f1f5f9;padding:2px 6px;border-radius:4px;font-size:13px;color:var(--red)}
+
+/* Stock section cards inside reports */
+.stock-section{border:1px solid var(--border);border-radius:var(--radius);margin:20px 0;overflow:hidden}
+.stock-section h2{margin:0;padding:14px 18px;background:linear-gradient(90deg,#eff6ff,#f8fafc);border-left:4px solid var(--accent);border-radius:0;font-size:16px}
+.stock-section .stock-body{padding:0 18px 14px}
+
+/* Tables */
+table.tbl{width:100%;border-collapse:collapse;font-size:13px;margin:12px 0;border-radius:var(--radius-sm);overflow:hidden;box-shadow:var(--shadow)}
+table.tbl th{background:var(--pri);color:#fff;padding:10px 12px;text-align:left;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.3px}
+table.tbl td{padding:8px 12px;border-bottom:1px solid var(--border);background:var(--card)}
+table.tbl tr:last-child td{border-bottom:none}
+table.tbl tr:hover td{background:var(--card-hover)}
+
+/* Footer */
+footer{margin-top:40px;color:var(--text-dim);font-size:12px;text-align:center;border-top:1px solid var(--border);padding-top:16px}
+footer a{color:var(--accent);text-decoration:none}
+
+/* Archive page */
+.archive-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px}
+.archive-item{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px 16px;text-decoration:none;color:var(--text);transition:all .15s;box-shadow:var(--shadow)}
+.archive-item:hover{transform:translateY(-2px);box-shadow:var(--shadow-lg);border-color:var(--accent)}
+.archive-item .date{font-weight:700;color:var(--pri);font-size:15px}
+.archive-item .count{font-size:12px;color:var(--text-mut);margin-top:4px}
+.archive-item .preview{font-size:12px;color:var(--text-mut);margin-top:6px;line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+
+/* Responsive */
+@media(max-width:640px){
+  .wrap{padding:0 12px 40px}
+  .nav{margin:0 -12px 16px;padding:10px 12px}
+  .hero{padding:20px 16px;border-radius:var(--radius-sm)}
+  .module{padding:16px 18px}
+  .card{padding:14px 16px}
+  .archive-list{grid-template-columns:1fr}
+}
+</style>
+</head><body><div class="wrap">
+<div class="hero"><h1>&#127919; A股智能分析 · 决策仪表盘</h1><div class="meta">DeepSeek AI · 4 只持仓 · 5 时段/天 · <span id="liveTime"></span></div>
+<div class="stats"><span>&#9889; 5次/天</span><span>&#128187; 4 持仓</span><span>&#128196; 3 报告</span><span>&#128176; &asymp;0 月成本</span></div></div>
+<div style="display:flex;gap:8px;margin-bottom:16px">
+<a class="card live" href="dashboard.html" style="flex:1"><div class="card-title">&#9889; 实时盯盘</div><div class="card-desc">30s 刷新 · 4 持仓 + 指数</div></a>
+<a class="card archive" href="archive.html" style="flex:1"><div class="card-title">&#128451; 历史归档</div><div class="card-desc">按日期浏览全部报告</div></a>
+</div>
+<div class="section-title">&#128197; 今日 5 时段分析<span class="count">0/5 已生成</span></div>
+<a class="card pending" style="border-left:4px solid #f59e0b" href="slot_0900.html"><div class="card-title">&#128338; 09:00 · 早盘分析 <span class="badge badge-pending">待生成</span></div><div class="card-desc">个股分析 + 大盘复盘 + 量化分析</div></a>
+<a class="card pending" style="border-left:4px solid #ef4444" href="slot_0930.html"><div class="card-title">&#128338; 09:30 · 开盘追踪 <span class="badge badge-pending">待生成</span></div><div class="card-desc">个股分析 + 大盘复盘 + 量化分析</div></a>
+<a class="card pending" style="border-left:4px solid #8b5cf6" href="slot_1200.html"><div class="card-title">&#128338; 12:00 · 午间复盘 <span class="badge badge-pending">待生成</span></div><div class="card-desc">个股分析 + 大盘复盘 + 量化分析</div></a>
+<a class="card pending" style="border-left:4px solid #3b82f6" href="slot_1430.html"><div class="card-title">&#128338; 14:30 · 午盘追踪 <span class="badge badge-pending">待生成</span></div><div class="card-desc">个股分析 + 大盘复盘 + 量化分析</div></a>
+<a class="card pending" style="border-left:4px solid #10b981" href="slot_1800.html"><div class="card-title">&#128338; 18:00 · 收盘复盘 <span class="badge badge-pending">待生成</span></div><div class="card-desc">个股分析 + 大盘复盘 + 量化分析</div></a>
+<footer><a href="https://github.com/Elevensails/daily_stock_analysis">Fork 自 daily_stock_analysis</a> · 09:00 早盘 / 09:30 开盘 / 12:00 午间 / 14:30 午盘 / 18:00 收盘<br>以上分析基于公开数据，不构成投资建议</footer>
+<script>(function(){var d=new Date();var bj=new Date(d.getTime()+d.getTimezoneOffset()*60000+8*3600000);var ts=bj.toISOString().replace('T',' ').slice(0,16);var el=document.getElementById('liveTime');if(el)el.textContent=ts;})();</script>
+</div></body></html>
