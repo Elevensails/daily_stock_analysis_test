@@ -1,0 +1,17 @@
+{
+  "name": "u2-public-page-ui",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "A股智能分析公开页前端（U2 方案C：内容排版彻底分离）",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "vite": "^5.4.10"
+  }
+}

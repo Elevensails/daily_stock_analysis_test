@@ -1,0 +1,9 @@
+# 前端构建产物与依赖（生成物，不提交）
+node_modules/
+dist/
+
+# 构建期注入的内容契约（由 scripts/emit_frontend_artifacts.py 生成）
+src/content/
+
+# 本地覆盖
+*.local

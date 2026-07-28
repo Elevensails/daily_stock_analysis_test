@@ -1,0 +1,78 @@
+/* ==========================================================================
+ * 空 / 待生成 / 错误 状态样式（P0-4：友好化，绝不裸露 Traceback）。
+ * 由 components/states.ts 的 renderPending/renderEmpty/renderError 渲染。
+ * ========================================================================== */
+
+.state-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 6px;
+  padding: 32px 20px;
+  margin: var(--space) 0;
+  background: var(--surface);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+  color: var(--text-muted);
+}
+.state-box__icon {
+  font-size: 30px;
+  line-height: 1;
+}
+.state-box__title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+}
+.state-box__desc {
+  font-size: 13px;
+  color: var(--text-muted);
+  max-width: 420px;
+}
+
+/* 待生成：警告色点缀 */
+.state-box--pending {
+  border-color: var(--warning);
+  background: var(--warning-soft);
+}
+.state-box--pending .state-box__icon {
+  filter: none;
+}
+
+/* 错误态：红框 + 软红底，绝不使用裸文本/代码块 */
+.state-box--error {
+  border-style: solid;
+  border-color: var(--up);
+  background: color-mix(in srgb, var(--up) 8%, var(--surface));
+  text-align: left;
+  align-items: flex-start;
+}
+.state-box--error .state-box__icon {
+  color: var(--up);
+}
+.state-box--error .state-box__title {
+  color: var(--up);
+}
+.state-box--error .state-box__detail {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  width: 100%;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+/* 报告内容整体被判定为错误态时的包裹（由页面在片段含错误标记时追加） */
+.error-box {
+  border: 1px solid var(--up) !important;
+  background: color-mix(in srgb, var(--up) 6%, var(--surface)) !important;
+}
+.error-box blockquote {
+  border-left-color: var(--up) !important;
+  background: color-mix(in srgb, var(--up) 10%, var(--surface)) !important;
+  color: var(--up) !important;
+}
