@@ -14,6 +14,10 @@ if __name__ == '__main__':
     print(f'GITHUB_TOKEN: {len(TOKEN)} chars (prefix: {TOKEN[:4]}...)')
 API = 'https://api.github.com/repos/Elevensails/daily_stock_analysis_test/contents'
 BRANCH = 'gh-pages'
+# Repo-root API base: strip the trailing '/contents' so we can reach branch/commit/Pages
+# endpoints (which live outside the Contents API). Derived from API to keep a single
+# source of truth — API/BRANCH themselves stay unchanged (tests assert on them).
+REPO_API = API.rsplit('/contents', 1)[0]
 HEADERS = {'Authorization': f'Bearer {TOKEN}', 'Content-Type': 'application/json'}
 
 # ====== PREMIUM CSS DESIGN SYSTEM ======
@@ -162,15 +166,134 @@ def md2html(md):
     return '\n'.join(out)
 
 # ====== GITHUB API HELPERS ======
-def gh_put(path, content_str, sha=None):
-    b64 = base64.b64encode(content_str.encode('utf-8')).decode('ascii')
-    payload = {'message': f'deploy {path}', 'content': b64, 'branch': BRANCH}
-    if sha: payload['sha'] = sha
-    req = urllib.request.Request(f'{API}/{path}', data=json.dumps(payload).encode('utf-8'), headers=HEADERS, method='PUT')
+def _gh_call(url, method, payload=None):
+    """Send an authenticated GitHub API call. Returns (status, json_body).
+
+    json_body is None when there is no decodable JSON. HTTP errors surface as
+    their status code (e.g. 404/409) so callers can branch on them; transport
+    errors (no network) return (0, None) so the deploy degrades gracefully.
+    """
+    data = json.dumps(payload).encode('utf-8') if payload is not None else None
+    req = urllib.request.Request(url, data=data, headers=HEADERS, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp: return resp.status
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            status = resp.status
+            raw = resp.read()
     except urllib.error.HTTPError as e:
-        print(f'  HTTP {e.code} for {path}'); return e.code
+        status = e.code
+        raw = e.read() if hasattr(e, 'read') else b''
+    except urllib.error.URLError as e:
+        print(f'  network error calling {url}: {e}')
+        return (0, None)
+    try:
+        body = json.loads(raw) if raw else None
+    except (ValueError, json.JSONDecodeError):
+        body = None
+    return (status, body)
+
+
+def _api_url(suffix: str) -> str:
+    """Build a repo-scoped GitHub API URL from the contents API base.
+
+    API ends with '/contents'; strip it to reach the repo root, then append the
+    repo-scoped ``suffix`` (e.g. '/branches/gh-pages').
+    """
+    return REPO_API + suffix
+
+
+def ensure_gh_pages_branch() -> None:
+    """Ensure the gh-pages branch exists; create an empty orphan on first deploy.
+
+    The Contents API ``PUT /contents/{path}`` only *updates* files. On the very
+    first run the gh-pages branch does not exist and no report files exist, so
+    every PUT returns HTTP 404, nothing is committed, the branch is never
+    created, and GitHub Pages 404s forever. We create an empty orphan branch via
+    the Git Data API before uploading any files.
+    """
+    branches_url = _api_url(f'/branches/{BRANCH}')
+    status, _ = _gh_call(branches_url, 'GET')
+    if status == 200:
+        print('  gh-pages branch already exists')
+        return
+    # 404 (or other) → create empty orphan via Git Data API.
+    print(f'  gh-pages branch missing (status={status}); creating empty orphan...')
+    base = _api_url('')
+    # a. empty tree
+    t_status, tree_body = _gh_call(f'{base}/git/trees', 'POST', {'tree': []})
+    if t_status != 201 or not tree_body:
+        print(f'  FAILED to create tree: status={t_status}')
+        return
+    tree_sha = tree_body.get('sha')
+    # b. empty commit (no parents → orphan)
+    c_status, commit_body = _gh_call(
+        f'{base}/git/commits', 'POST',
+        {'message': 'init gh-pages', 'tree': tree_sha, 'parents': []},
+    )
+    if c_status != 201 or not commit_body:
+        print(f'  FAILED to create commit: status={c_status}')
+        return
+    commit_sha = commit_body.get('sha')
+    # c. create the ref
+    r_status, _ = _gh_call(
+        f'{base}/git/refs', 'POST',
+        {'ref': f'refs/heads/{BRANCH}', 'sha': commit_sha},
+    )
+    if r_status == 201:
+        print(f'  gh-pages branch created (commit {str(commit_sha)[:8]})')
+    else:
+        print(f'  FAILED to create ref: status={r_status}')
+
+
+def ensure_pages_enabled() -> None:
+    """Enable GitHub Pages (serving gh-pages) if not already enabled.
+
+    Without this the deployed files exist on gh-pages but the site is never
+    served, so the page still 404s. Idempotent: a 200 (already on) or 409
+    (concurrent enable) are both treated as success.
+    """
+    pages_url = _api_url('/pages')
+    status, _ = _gh_call(pages_url, 'GET')
+    if status == 200:
+        print('  GitHub Pages already enabled')
+        return
+    if status == 404:
+        body = {'source': {'branch': BRANCH, 'path': '/'}, 'build_type': 'legacy'}
+        p_status, _ = _gh_call(pages_url, 'POST', body)
+        if p_status in (200, 201):
+            print('  GitHub Pages enabled (branch=gh-pages)')
+        elif p_status == 409:
+            print('  GitHub Pages already enabled (409)')
+        else:
+            print(f'  FAILED to enable Pages: status={p_status}')
+    else:
+        print(f'  skipping Pages enable, unexpected status={status}')
+
+
+def gh_put(path, content_str, sha=None):
+    """Create or update a file on the gh-pages branch (first-deploy safe).
+
+    Before writing we read the current sha via ``GET /contents/{path}?ref=gh-pages``:
+      - 200 (file exists) → ``PUT`` with sha (update, exactly as before)
+      - 404 (file missing) → ``POST`` to create the file (first deploy / new page)
+    The caller may pass ``sha`` pre-fetched via ``gh_get_sha``; if omitted we
+    fetch it ourselves so the create-vs-update decision is always correct.
+    """
+    b64 = base64.b64encode(content_str.encode('utf-8')).decode('ascii')
+    if sha is None:
+        sha = gh_get_sha(path)
+    if sha:
+        payload = {'message': f'deploy {path}', 'content': b64, 'branch': BRANCH, 'sha': sha}
+        method = 'PUT'
+    else:
+        # Create: POST (branch already exists after ensure_gh_pages_branch).
+        payload = {'message': f'deploy {path}', 'content': b64, 'branch': BRANCH}
+        method = 'POST'
+    req = urllib.request.Request(f'{API}/{path}', data=json.dumps(payload).encode('utf-8'), headers=HEADERS, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.status
+    except urllib.error.HTTPError as e:
+        print(f'  HTTP {e.code} for {path} ({method})'); return e.code
 
 def gh_get_sha(path):
     try:
@@ -377,6 +500,7 @@ def main():
     now_ts = now.strftime('%Y-%m-%d %H:%M')
     md_files = sorted(glob.glob(os.path.join(reports_dir, '*.md')))
     print(f'Found {len(md_files)} MD files')
+    ensure_gh_pages_branch()  # first-deploy bootstrap: create gh-pages if missing
     reports_dict = {}
     for f in md_files:
         bn = os.path.basename(f)
@@ -421,6 +545,7 @@ def main():
     # Debug
     dbg={'md_files':len(md_files),'slots':list(reports_dict.keys())}
     gh_put('debug.json', json.dumps(dbg,indent=2))
+    ensure_pages_enabled()  # first-deploy bootstrap: turn on GitHub Pages
     print('deploy done')
 
 if __name__ == '__main__': main()
