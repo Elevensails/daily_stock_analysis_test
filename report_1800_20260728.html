@@ -1,0 +1,428 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>🎯 2026-07-28 决策仪表盘</title><style>
+:root {
+  --pri: #1e3a5f; --pri-lt: #1e40af; --accent: #2563eb;
+  --bg: #f0f4f8; --card: #fff; --card-hover: #f8fafc;
+  --text: #1e293b; --text-mut: #64748b; --text-dim: #94a3b8;
+  --border: #e2e8f0; --border-focus: #93c5fd;
+  --green: #16a34a; --green-bg: #dcfce7;
+  --red: #dc2626; --red-bg: #fee2e2;
+  --amber: #d97706; --amber-bg: #fef3c7;
+  --purple: #7c3aed; --purple-bg: #f3e8ff;
+  --radius: 12px; --radius-sm: 8px;
+  --shadow: 0 1px 3px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04);
+  --shadow-lg: 0 4px 16px rgba(0,0,0,.08);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);font-family:-apple-system,"PingFang SC","Microsoft YaHei","Noto Sans SC",sans-serif;font-size:15px;line-height:1.75;color:var(--text);-webkit-font-smoothing:antialiased}
+.wrap{max-width:960px;margin:0 auto;padding:0 20px 60px}
+
+/* Navigation */
+.nav{position:sticky;top:0;z-index:100;background:rgba(255,255,255,.92);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-bottom:1px solid var(--border);padding:12px 20px;display:flex;gap:8px;align-items:center;margin:0 -20px 24px}
+.nav a,.nav span{display:inline-flex;align-items:center;gap:5px;padding:6px 14px;border-radius:var(--radius-sm);font-size:13px;font-weight:500;text-decoration:none;transition:all .15s}
+.nav a{background:var(--pri);color:#fff}
+.nav a:hover{background:var(--pri-lt);transform:translateY(-1px)}
+.nav a.ghost{background:transparent;color:var(--pri);border:1px solid var(--border)}
+.nav a.ghost:hover{background:var(--card-hover)}
+.nav .sep{color:var(--text-dim);font-size:14px;padding:0 2px}
+
+/* Cards */
+.card{display:block;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:20px 24px;margin:14px 0;text-decoration:none;color:inherit;transition:all .2s;box-shadow:var(--shadow)}
+.card:hover{transform:translateY(-2px);box-shadow:var(--shadow-lg);border-color:var(--border-focus)}
+.card .card-title{font-size:17px;font-weight:700;color:var(--pri);margin-bottom:4px}
+.card .card-desc{font-size:13px;color:var(--text-mut);line-height:1.6}
+.card.pending{opacity:.45;pointer-events:none}
+.card.stock{border-left:4px solid var(--accent)}
+.card.market{border-left:4px solid #0d9488}
+.card.quant{border-left:4px solid var(--purple);background:linear-gradient(135deg,var(--purple-bg),#fff)}
+.card.live{border-left:4px solid var(--amber);background:linear-gradient(135deg,var(--amber-bg),#fff)}
+.card.archive{border-left:4px solid var(--text-dim)}
+
+.badge{display:inline-block;color:#fff;padding:2px 10px;border-radius:20px;font-size:11px;font-weight:600;margin-left:8px;vertical-align:middle}
+.badge-ok{background:var(--green)}
+.badge-pending{background:var(--text-dim)}
+
+/* Header */
+.hero{background:linear-gradient(135deg,var(--pri),var(--pri-lt));color:#fff;padding:28px 24px;border-radius:var(--radius);margin-bottom:24px;text-align:center;box-shadow:var(--shadow-lg)}
+.hero h1{font-size:24px;margin-bottom:6px;letter-spacing:-.3px}
+.hero .meta{opacity:.88;font-size:13px;margin-top:8px}
+.stats{display:flex;gap:10px;justify-content:center;margin-top:12px;flex-wrap:wrap}
+.stats span{background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.25);border-radius:20px;padding:3px 14px;font-size:12px;white-space:nowrap}
+
+/* Section */
+.section-title{font-size:14px;font-weight:700;color:var(--text-mut);margin:28px 0 12px;padding-bottom:8px;border-bottom:2px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+.section-title .count{font-size:12px;font-weight:500;color:var(--text-dim)}
+
+/* Report Content */
+.module{background:var(--card);border-radius:var(--radius);padding:24px 28px;margin:16px 0;box-shadow:var(--shadow)}
+.module h1{font-size:22px;margin:0 0 20px;color:var(--pri);padding-bottom:12px;border-bottom:2px solid var(--border)}
+.module h2{font-size:18px;margin:28px 0 14px;padding:10px 0 10px 14px;border-left:4px solid var(--accent);background:linear-gradient(90deg,#eff6ff,transparent);border-radius:0 var(--radius-sm) var(--radius-sm) 0;color:var(--pri)}
+.module h3{font-size:15px;margin:20px 0 10px;color:var(--text);font-weight:700}
+.module p{font-size:14px;line-height:1.8;color:var(--text);margin:0 0 10px}
+.module blockquote{border-left:4px solid var(--accent);background:#eff6ff;padding:12px 16px;margin:12px 0;border-radius:0 var(--radius-sm) var(--radius-sm) 0;font-size:14px;color:var(--pri)}
+.module li{font-size:14px;line-height:1.8;color:var(--text);margin:3px 0;padding-left:4px}
+.module li::marker{color:var(--accent)}
+.module hr{border:none;border-top:1px solid var(--border);margin:20px 0}
+.module strong{color:var(--pri);font-weight:700}
+.module code{background:#f1f5f9;padding:2px 6px;border-radius:4px;font-size:13px;color:var(--red)}
+
+/* Stock section cards inside reports */
+.stock-section{border:1px solid var(--border);border-radius:var(--radius);margin:20px 0;overflow:hidden}
+.stock-section h2{margin:0;padding:14px 18px;background:linear-gradient(90deg,#eff6ff,#f8fafc);border-left:4px solid var(--accent);border-radius:0;font-size:16px}
+.stock-section .stock-body{padding:0 18px 14px}
+
+/* Tables */
+table.tbl{width:100%;border-collapse:collapse;font-size:13px;margin:12px 0;border-radius:var(--radius-sm);overflow:hidden;box-shadow:var(--shadow)}
+table.tbl th{background:var(--pri);color:#fff;padding:10px 12px;text-align:left;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.3px}
+table.tbl td{padding:8px 12px;border-bottom:1px solid var(--border);background:var(--card)}
+table.tbl tr:last-child td{border-bottom:none}
+table.tbl tr:hover td{background:var(--card-hover)}
+
+/* Footer */
+footer{margin-top:40px;color:var(--text-dim);font-size:12px;text-align:center;border-top:1px solid var(--border);padding-top:16px}
+footer a{color:var(--accent);text-decoration:none}
+
+/* Archive page */
+.archive-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px}
+.archive-item{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px 16px;text-decoration:none;color:var(--text);transition:all .15s;box-shadow:var(--shadow)}
+.archive-item:hover{transform:translateY(-2px);box-shadow:var(--shadow-lg);border-color:var(--accent)}
+.archive-item .date{font-weight:700;color:var(--pri);font-size:15px}
+.archive-item .count{font-size:12px;color:var(--text-mut);margin-top:4px}
+.archive-item .preview{font-size:12px;color:var(--text-mut);margin-top:6px;line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+
+/* Responsive */
+@media(max-width:640px){
+  .wrap{padding:0 12px 40px}
+  .nav{margin:0 -12px 16px;padding:10px 12px}
+  .hero{padding:20px 16px;border-radius:var(--radius-sm)}
+  .module{padding:16px 18px}
+  .card{padding:14px 16px}
+  .archive-list{grid-template-columns:1fr}
+}
+</style></head>
+<body><div class="nav"><a href="index.html">&#127968; 首页</a><span class="sep">/</span><a href="archive.html">&#128451; 历史</a><span class="sep">/</span><a href="javascript:history.back()" class="ghost">&#8592; 返回</a></div>
+<div class="wrap"><div class="module"><h1>🎯 2026-07-28 决策仪表盘</h1>
+<blockquote>共分析 **4** 只股票 | 🟢买入:0 🟡观望:3 🔴卖出:1</blockquote>
+<p>市场状态：A股 · 盘后</p>
+<div class="stock-section"><h2>📊 分析结果摘要</h2><div class="stock-body">
+<p>🟡 <strong>招商银行(600036)</strong>: 持有 | 评分 59 | 看多</p>
+<p>🟡 <strong>有色金属ETF南方(512400)</strong>: 持有 | 评分 59 | 看多（谨慎）</p>
+<p>⚪ <strong>百合花(603823)</strong>: 观望 | 评分 40 | 看空</p>
+<p>🟠 <strong>创业板ETF易方达(159915)</strong>: 减仓 | 评分 32 | 强烈看空</p>
+<hr>
+</div></div>
+<div class="stock-section"><h2>🟡 招商银行 (600036)</h2><div class="stock-body">
+<h3>📰 重要信息速览</h3>
+<p><strong>💭 舆情情绪</strong>: 舆情平静，估值偏低成为潜在支撑因素。</p>
+<p><strong>📊 业绩预期</strong>: 无最新业绩预告数据，但当前动态PE仅6.62倍，PB 0.9倍，估值处于历史低位，安全边际较高。</p>
+<p><strong>📢 最新动态</strong>: 【最新消息】近3日内未检索到相关新闻或公告。</p>
+<h3>📌 核心结论</h3>
+<p><strong>🟡 持有</strong> | 看多</p>
+<blockquote>**一句话决策**: 持有观察：资金流数据缺失，买入结论缺少资金面确认，先按观察处理。</blockquote>
+<p>⏰ <strong>时效性</strong>: 本周内</p>
+<div style="overflow-x:auto"><table class="tbl"><thead><tr><th>持仓情况</th><th>操作建议</th></tr></thead><tbody>
+<tr><td>🆕 **空仓者**</td><td>空仓先不追买，等待资金流恢复、支撑确认或有效突破后再行动。</td></tr>
+<tr><td>💼 **持仓者**</td><td>持仓以关键支撑为风控线，资金流恢复前控制仓位。</td></tr>
+</tbody></table></div>
+<h3>📈 当日行情</h3>
+<div style="overflow-x:auto"><table class="tbl"><thead><tr><th>收盘</th><th>昨收</th><th>开盘</th><th>最高</th><th>最低</th><th>涨跌幅</th><th>涨跌额</th><th>振幅</th><th>成交量</th><th>成交额</th></tr></thead><tbody>
+<tr><td>39.59</td><td>39.20</td><td>39.17</td><td>39.59</td><td>38.95</td><td>1.51%</td><td>0.39</td><td>1.63%</td><td>1.05 亿股</td><td>41.36 亿元</td></tr>
+</tbody></table></div>
+<div style="overflow-x:auto"><table class="tbl"><thead><tr><th>当前价</th><th>量比</th><th>换手率</th><th>行情来源</th></tr></thead><tbody>
+<tr><td>39.59</td><td>1.02</td><td>0.51%</td><td>腾讯财经</td></tr>
+</tbody></table></div>
+<h3>📊 数据透视</h3>
+<p><strong>均线排列</strong>: MA5(39.08) &gt; MA10(38.58) &gt; MA20(37.51)，典型多头排列，上升趋势确立。 | 多头排列: ✅ 是 | 趋势强度: 80/100</p>
+<div style="overflow-x:auto"><table class="tbl"><thead><tr><th>价格指标</th><th>当前价</th></tr></thead><tbody>
+<tr><td>当前价</td><td>39.59</td></tr>
+<tr><td>MA5</td><td>39.08</td></tr>
+<tr><td>MA10</td><td>38.58</td></tr>
+<tr><td>MA20</td><td>37.51</td></tr>
+<tr><td>乖离率(MA5)</td><td>1.3% 安全</td></tr>
+<tr><td>支撑位</td><td>38.58</td></tr>
+<tr><td>压力位</td><td>40.0</td></tr>
+</tbody></table></div>
+<p><strong>成交量</strong>: 量比 1.02 (平量) | 换手率 0.51%</p>
+<p>💡 *量能维持正常水平，上涨配合温和，筹码锁定良好。*</p>
+<p><strong>筹码</strong>: 筹码分布未启用或数据源暂不可用，未纳入筹码判断。</p>
+<h3>🛡️ 盘中决策护栏</h3>
+<div style="overflow-x:auto"><table class="tbl"><thead><tr><th>行动窗口</th><th>当前动作</th><th>下次检查</th></tr></thead><tbody>
+<tr><td>盘后复盘</td><td>无盘中动作</td><td>2026-07-29 09:30</td></tr>
+</tbody></table></div>
+<p><strong>观察条件</strong>:</p>
+<li>观察次日开盘是否站稳MA5</li>
+<li>关注大盘银行板块强度</li>
+<p><strong>置信度理由</strong>: 技术数据完整，但筹码缺失、技术部分因实时叠加告警置信度降为中，盘后阶段无需盘中决策。</p>
+<p><strong>数据限制</strong>:</p>
+<li>筹码分布数据缺失</li>
+<li>技术指标部分可用（intraday_realtime_overlay）</li>
+<li>technical: partial</li>
+<h3>🎯 作战计划</h3>
+<p><strong>📍 操作点位</strong></p>
+<div style="overflow-x:auto"><table class="tbl"><thead><tr><th>操作点位</th><th>当前价</th></tr></thead><tbody>
+<tr><td>🎯 理想买入点</td><td>39.08元（MA5附近）</td></tr>
+<tr><td>🔵 次优买入点</td><td>38.58元（MA10附近）</td></tr>
+<tr><td>🛑 止损位</td><td>37.50元（跌破MA20或-2.6%）</td></tr>
+<tr><td>🎊 目标位</td><td>40.50元（前高/整数关口）</td></tr>
+</tbody></table></div>
+<p><strong>💰 仓位建议</strong>: 建议仓位：2成</p>
+<li>建仓策略: 分两批：现价39.59元可先建1成，若回踩MA5附近加仓1成。</li>
+<li>风控策略: 跌破MA20无条件止损；若大盘进一步恶化，减至观望。</li>
+<p><strong>✅ 检查清单</strong></p>
+<li>✅ 多头排列（MA5&gt;MA10&gt;MA20）</li>
+<li>✅ 乖离率1.30% &lt; 5%，安全范围</li>
+<li>✅ 量能正常，未异常放量或缩量</li>
+<li>✅ 无重大利空（减持、处罚、业绩变脸）</li>
+<li>⚠️ 筹码结构数据缺失，无法判断健康度</li>
+<li>✅ PE 6.62倍，估值合理偏低</li>
+<h3>🎯 信号归因分析</h3>
+<p><strong>归因权重</strong>:</p>
+<li>📈 技术指标: 70%</li>
+<li>📰 新闻舆情: 5%</li>
+<li>📊 基本面: 25%</li>
+<li>🌐 市场环境: 0%</li>
+<p><strong>🐂 最强看多信号</strong>: 均线多头排列+低乖离率+低估值</p>
+<p><strong>🐻 最强看空信号</strong>: 大盘整体偏弱，创业板暴跌，资金避险情绪可能压制指数</p>
+<h3>🧩 关联板块</h3>
+<p>银行 / 银行Ⅱ / 股份制银行Ⅲ / 广东板块 / 跨境支付</p>
+<hr>
+</div></div>
+<div class="stock-section"><h2>🟡 有色金属ETF南方 (512400)</h2><div class="stock-body">
+<h3>📰 重要信息速览</h3>
+<p><strong>💭 舆情情绪</strong>: 舆情无明显消息，市场关注度低。</p>
+<p><strong>📊 业绩预期</strong>: ETF跟踪指数，业绩依赖成分股整体表现，当前无数据。</p>
+<p><strong>🚨 风险警报</strong>:</p>
+<li>2026-07-28 大盘环境偏弱，创业板暴跌7.34%，资金从高估值切换，可能对周期板块造成短期冲击。</li>
+<li>2026-07-28 均线未形成标准多头排列，MA10&lt;MA20，中期压制明显。</li>
+<p><strong>📢 最新动态</strong>: 近3日无相关新闻，消息面平静。</p>
+<h3>📌 核心结论</h3>
+<p><strong>🟡 持有</strong> | 看多（谨慎）</p>
+<blockquote>**一句话决策**: 持有观察：市场资金流服务暂不支持，买入结论缺少资金面确认，先按观察处理。</blockquote>
+<p>⏰ <strong>时效性</strong>: 今日内</p>
+<div style="overflow-x:auto"><table class="tbl"><thead><tr><th>持仓情况</th><th>操作建议</th></tr></thead><tbody>
+<tr><td>🆕 **空仓者**</td><td>空仓先不追买，等待资金流恢复、支撑确认或有效突破后再行动。</td></tr>
+<tr><td>💼 **持仓者**</td><td>持仓以关键支撑为风控线，资金流恢复前控制仓位。</td></tr>
+</tbody></table></div>
+<h3>📈 当日行情</h3>
+<div style="overflow-x:auto"><table class="tbl"><thead><tr><th>收盘</th><th>昨收</th><th>开盘</th><th>最高</th><th>最低</th><th>涨跌幅</th><th>涨跌额</th><th>振幅</th><th>成交量</th><th>成交额</th></tr></thead><tbody>
+<tr><td>1.74</td><td>1.78</td><td>1.74</td><td>1.76</td><td>1.72</td><td>-2.25%</td><td>-0.04</td><td>2.08%</td><td>532.05 万股</td><td>9.24 亿元</td></tr>
+</tbody></table></div>
+<div style="overflow-x:auto"><table class="tbl"><thead><tr><th>当前价</th><th>量比</th><th>换手率</th><th>行情来源</th></tr></thead><tbody>
+<tr><td>1.74</td><td>0.77</td><td>4.18%</td><td>东方财富</td></tr>
+</tbody></table></div>
+<h3>📊 数据透视</h3>
+<p><strong>均线排列</strong>: MA5&gt;MA10 但 MA10&lt;MA20，短期多头但中期均线压制，属于弱势多头整理。 | 多头排列: ❌ 否 | 趋势强度: 55/100</p>
+<div style="overflow-x:auto"><table class="tbl"><thead><tr><th>价格指标</th><th>当前价</th></tr></thead><tbody>
+<tr><td>当前价</td><td>1.736</td></tr>
+<tr><td>MA5</td><td>1.767</td></tr>
+<tr><td>MA10</td><td>1.727</td></tr>
+<tr><td>MA20</td><td>1.763</td></tr>
+<tr><td>乖离率(MA5)</td><td>-1.78% 安全</td></tr>
+<tr><td>支撑位</td><td>1.727</td></tr>
+<tr><td>压力位</td><td>1.767</td></tr>
+</tbody></table></div>
+<p><strong>成交量</strong>: 量比 0.77 (缩量) | 换手率 4.18%</p>
+<p>💡 *缩量回调，抛压减弱，洗盘特征明显。*</p>
+<p><strong>筹码</strong>: 筹码分布未启用或数据源暂不可用，未纳入筹码判断。</p>
+<h3>🛡️ 盘中决策护栏</h3>
+<div style="overflow-x:auto"><table class="tbl"><thead><tr><th>行动窗口</th><th>当前动作</th><th>下次检查</th></tr></thead><tbody>
+<tr><td>盘后复盘</td><td>明日盘中观察</td><td>2026-07-29 09:30</td></tr>
+</tbody></table></div>
+<p><strong>观察条件</strong>:</p>
+<li>是否放量突破MA5（1.767元）确认走强</li>
+<li>是否回踩MA10（1.727元）不破并获得支撑</li>
+<p><strong>置信度理由</strong>: 盘后数据完整，但筹码缺失，技术部分可用，置信度中等。</p>
+<p><strong>数据限制</strong>:</p>
+<li>筹码分布数据缺失</li>
+<li>技术指标为部分可用（实时覆盖叠加）</li>
+<li>technical: partial</li>
+<h3>🎯 作战计划</h3>
+<p><strong>📍 操作点位</strong></p>
+<div style="overflow-x:auto"><table class="tbl"><thead><tr><th>操作点位</th><th>当前价</th></tr></thead><tbody>
+<tr><td>🎯 理想买入点</td><td>1.727元（在MA10附近）</td></tr>
+<tr><td>🔵 次优买入点</td><td>1.70元（整数关口/前低支撑）</td></tr>
+<tr><td>🛑 止损位</td><td>1.69元（跌破1.70元确认走弱）</td></tr>
+<tr><td>🎊 目标位</td><td>1.78元（前期小高点/MA20上方）</td></tr>
+</tbody></table></div>
+<p><strong>💰 仓位建议</strong>: 建议仓位：2成</p>
+<li>建仓策略: 首次在1.727元附近建仓1成，若回踩1.70元且放量企稳可加仓至2成。</li>
+<li>风控策略: 总仓位不超过2成，跌破1.69元立即止损。</li>
+<p><strong>✅ 检查清单</strong></p>
+<li>❌ 检查项1：多头排列（MA5&gt;MA10&gt;MA20不满足）</li>
+<li>✅ 检查项2：乖离率合理（-1.78%，安全范围）</li>
+<li>✅ 检查项3：量能配合（缩量回调）</li>
+<li>✅ 检查项4：无重大利空（新闻平静，无减持/处罚）</li>
+<li>⚠️ 检查项5：筹码健康（数据缺失，无法判断）</li>
+<li>✅ 检查项6：PE估值（ETF无PE，不适用）</li>
+<h3>🎯 信号归因分析</h3>
+<p><strong>归因权重</strong>:</p>
+<li>📈 技术指标: 70%</li>
+<li>📰 新闻舆情: 0%</li>
+<li>📊 基本面: 0%</li>
+<li>🌐 市场环境: 30%</li>
+<p><strong>🐂 最强看多信号</strong>: 缩量回踩MA10支撑</p>
+<p><strong>🐻 最强看空信号</strong>: 大盘资金切换，高估值板块暴跌可能拖累周期股</p>
+<hr>
+</div></div>
+<div class="stock-section"><h2>⚪ 百合花 (603823)</h2><div class="stock-body">
+<h3>📰 重要信息速览</h3>
+<p><strong>💭 舆情情绪</strong>: 市场恐慌情绪蔓延，该股跌停后人气极低。</p>
+<p><strong>📊 业绩预期</strong>: 业绩数据缺失，无法判断。</p>
+<p><strong>🚨 风险警报</strong>:</p>
+<li>市盈率高达156倍，估值严重偏高，存在杀估值风险。</li>
+<li>今日跌停收盘，短期惯性下探风险大。</li>
+<p><strong>📢 最新动态</strong>: 【无最新消息】近3日未检索到重大新闻或公告。</p>
+<h3>📌 核心结论</h3>
+<p><strong>⚪ 观望</strong> | 看空</p>
+<blockquote>**一句话决策**: 缩量跌停破位，短期风险未释放，建议观望等待企稳。</blockquote>
+<p>⏰ <strong>时效性</strong>: 今日内</p>
+<div style="overflow-x:auto"><table class="tbl"><thead><tr><th>持仓情况</th><th>操作建议</th></tr></thead><tbody>
+<tr><td>🆕 **空仓者**</td><td>空仓者建议：不急于抄底，等待股价重新站上MA20且成交放量再考虑。</td></tr>
+<tr><td>💼 **持仓者**</td><td>持仓者建议：若成本较高可考虑减仓规避持续下跌风险；若成本较低可设止损于MA20下方（约68元）。</td></tr>
+</tbody></table></div>
+<h3>📈 当日行情</h3>
+<div style="overflow-x:auto"><table class="tbl"><thead><tr><th>收盘</th><th>昨收</th><th>开盘</th><th>最高</th><th>最低</th><th>涨跌幅</th><th>涨跌额</th><th>振幅</th><th>成交量</th><th>成交额</th></tr></thead><tbody>
+<tr><td>61.49</td><td>68.32</td><td>67.95</td><td>68.31</td><td>61.49</td><td>-10.00%</td><td>-6.83</td><td>9.98%</td><td>942.27 万股</td><td>5.97 亿元</td></tr>
+</tbody></table></div>
+<div style="overflow-x:auto"><table class="tbl"><thead><tr><th>当前价</th><th>量比</th><th>换手率</th><th>行情来源</th></tr></thead><tbody>
+<tr><td>61.49</td><td>0.42</td><td>2.26%</td><td>腾讯财经</td></tr>
+</tbody></table></div>
+<h3>📊 数据透视</h3>
+<p><strong>均线排列</strong>: 均线短期空头（MA5&lt;MA10），但MA10仍高于MA20，中期尚未完全转空，属于短期破位形态。 | 多头排列: ❌ 否 | 趋势强度: 35/100</p>
+<div style="overflow-x:auto"><table class="tbl"><thead><tr><th>价格指标</th><th>当前价</th></tr></thead><tbody>
+<tr><td>当前价</td><td>61.49</td></tr>
+<tr><td>MA5</td><td>72.28</td></tr>
+<tr><td>MA10</td><td>72.56</td></tr>
+<tr><td>MA20</td><td>68.97</td></tr>
+<tr><td>乖离率(MA5)</td><td>-14.93% 危险</td></tr>
+<tr><td>支撑位</td><td>61.49</td></tr>
+<tr><td>压力位</td><td>68.97</td></tr>
+</tbody></table></div>
+<p><strong>成交量</strong>: 量比 0.42 (缩量) | 换手率 2.26%</p>
+<p>💡 *缩量跌停，抛压未充分释放，后市可能继续探底。*</p>
+<p><strong>筹码</strong>: 筹码分布未启用或数据源暂不可用，未纳入筹码判断。</p>
+<h3>🛡️ 盘中决策护栏</h3>
+<div style="overflow-x:auto"><table class="tbl"><thead><tr><th>行动窗口</th><th>当前动作</th><th>下次检查</th></tr></thead><tbody>
+<tr><td>盘后复盘</td><td>无盘中动作</td><td>2026-07-29 09:25（集合竞价后）</td></tr>
+</tbody></table></div>
+<p><strong>观察条件</strong>:</p>
+<li>观察次日开盘是否继续跌停或低开后放量反弹</li>
+<li>观察大盘是否企稳</li>
+<p><strong>置信度理由</strong>: 技术面数据完整但无筹码和新闻支持，且数据质量存在partial告警，故置信度为中。</p>
+<p><strong>数据限制</strong>:</p>
+<li>技术指标为部分可用（intraday_realtime_overlay）</li>
+<li>筹码分布数据缺失</li>
+<li>近3日无相关新闻</li>
+<li>technical: partial</li>
+<h3>🎯 作战计划</h3>
+<p><strong>📍 操作点位</strong></p>
+<div style="overflow-x:auto"><table class="tbl"><thead><tr><th>操作点位</th><th>当前价</th></tr></thead><tbody>
+<tr><td>🎯 理想买入点</td><td>暂不设定理想买入点，待股价企稳并站上MA20（68.97元）后再评估。</td></tr>
+<tr><td>🔵 次优买入点</td><td>暂不设定，观望为主。</td></tr>
+<tr><td>🛑 止损位</td><td>持仓者止损位：60.00元（跌停板下方）或根据成本设5%止损。</td></tr>
+<tr><td>🎊 目标位</td><td>无明确目标，反弹至MA5（72.28元）附近可减仓。</td></tr>
+</tbody></table></div>
+<p><strong>💰 仓位建议</strong>: 0成（空仓观望）</p>
+<li>建仓策略: 不进场，等待价格放量收复MA20后再考虑轻仓试探。</li>
+<li>风控策略: 若持仓，严格执行止损，避免深套。</li>
+<p><strong>✅ 检查清单</strong></p>
+<li>❌ 检查项1：多头排列（MA5&lt;MA10&lt;MA20？不满足）</li>
+<li>⚠️ 检查项2：乖离率-14.93%远超5%，虽不属于追高，但超卖严重，需等待修复</li>
+<li>✅ 检查项3：量能配合（缩量跌停，抛压未释放，并非好信号）</li>
+<li>✅ 检查项4：无重大利空（新闻暂无）</li>
+<li>❌ 检查项5：筹码健康（数据缺失，无法判断）</li>
+<li>❌ 检查项6：PE估值合理（156倍极高）</li>
+<h3>🎯 信号归因分析</h3>
+<p><strong>归因权重</strong>:</p>
+<li>📈 技术指标: 70%</li>
+<li>📰 新闻舆情: 0%</li>
+<li>📊 基本面: 10%</li>
+<li>🌐 市场环境: 20%</li>
+<p><strong>🐂 最强看多信号</strong>: 缩量跌停可能预示恐慌性最后一跌（但尚未验证）</p>
+<p><strong>🐻 最强看空信号</strong>: 均线死叉+乖离率巨大+PE估值极高</p>
+<h3>🧩 关联板块</h3>
+<p>化学制品 / 基础化工 / 涂料油墨 / 浙江板块 / 光刻胶</p>
+<hr>
+</div></div>
+<div class="stock-section"><h2>🟠 创业板ETF易方达 (159915)</h2><div class="stock-body">
+<h3>📰 重要信息速览</h3>
+<p><strong>💭 舆情情绪</strong>: 市场恐慌情绪蔓延，资金逃离成长板块，短期难言乐观。</p>
+<p><strong>📊 业绩预期</strong>: ETF跟踪创业板指，成分股业绩预期整体疲软，暂无反弹催化剂。</p>
+<p><strong>🚨 风险警报</strong>:</p>
+<li>2026-07-28：创业板指放量暴跌，领跌市场，风险情绪极度悲观。</li>
+<li>2026-07-28：均线全面空头，乖离率-5%，若继续下探可能引发止损连锁反应。</li>
+<p><strong>✨ 利好催化</strong>:</p>
+<li>2026-07-28：无明确利好催化。</li>
+<p><strong>📢 最新动态</strong>: 【2026-07-28】今日创业板指暴跌7.34%，创业板ETF易方达跟跌7.12%，市场恐慌性抛售，资金从成长股大幅流出。</p>
+<h3>📌 核心结论</h3>
+<p><strong>🟠 减仓</strong> | 强烈看空</p>
+<blockquote>**一句话决策**: 空头排列且放量下跌，持仓者减仓避险，空仓者观望不抄底。</blockquote>
+<p>⏰ <strong>时效性</strong>: 今日内</p>
+<div style="overflow-x:auto"><table class="tbl"><thead><tr><th>持仓情况</th><th>操作建议</th></tr></thead><tbody>
+<tr><td>🆕 **空仓者**</td><td>空仓者建议：耐心等待，不参与下跌趋势，密切关注MA20或右侧企稳信号。</td></tr>
+<tr><td>💼 **持仓者**</td><td>持仓者建议：今日收盘已跌破MA5、MA10、MA20，乖离率过大，建议减仓或止损，控制仓位风险。</td></tr>
+</tbody></table></div>
+<h3>📈 当日行情</h3>
+<div style="overflow-x:auto"><table class="tbl"><thead><tr><th>收盘</th><th>昨收</th><th>开盘</th><th>最高</th><th>最低</th><th>涨跌幅</th><th>涨跌额</th><th>振幅</th><th>成交量</th><th>成交额</th></tr></thead><tbody>
+<tr><td>3.35</td><td>3.51</td><td>3.51</td><td>3.54</td><td>3.33</td><td>-7.12%</td><td>-0.15</td><td>5.79%</td><td>3733.77 万股</td><td>127.93 亿元</td></tr>
+</tbody></table></div>
+<div style="overflow-x:auto"><table class="tbl"><thead><tr><th>当前价</th><th>量比</th><th>换手率</th><th>行情来源</th></tr></thead><tbody>
+<tr><td>3.35</td><td>1.51</td><td>22.00%</td><td>东方财富</td></tr>
+</tbody></table></div>
+<h3>📊 数据透视</h3>
+<p><strong>均线排列</strong>: 空头排列：MA5(3.532)&lt;MA10(3.586)&lt;MA20(3.775)，趋势全面转弱。 | 多头排列: ❌ 否 | 趋势强度: 25/100</p>
+<div style="overflow-x:auto"><table class="tbl"><thead><tr><th>价格指标</th><th>当前价</th></tr></thead><tbody>
+<tr><td>当前价</td><td>3.355</td></tr>
+<tr><td>MA5</td><td>3.5316</td></tr>
+<tr><td>MA10</td><td>3.5858</td></tr>
+<tr><td>MA20</td><td>3.7747</td></tr>
+<tr><td>乖离率(MA5)</td><td>-5.0% 危险（绝对值超5%）</td></tr>
+<tr><td>支撑位</td><td>3.335</td></tr>
+<tr><td>压力位</td><td>3.5316</td></tr>
+</tbody></table></div>
+<p><strong>成交量</strong>: 量比 1.51 (放量) | 换手率 22.0%</p>
+<p>💡 *放量下跌，抛压沉重，短期难以止跌。*</p>
+<p><strong>筹码</strong>: 筹码分布未启用或数据源暂不可用，未纳入筹码判断。</p>
+<h3>🛡️ 盘中决策护栏</h3>
+<div style="overflow-x:auto"><table class="tbl"><thead><tr><th>行动窗口</th><th>当前动作</th><th>下次检查</th></tr></thead><tbody>
+<tr><td>盘后复盘</td><td>无盘中动作</td><td>2026-07-29 09:25</td></tr>
+</tbody></table></div>
+<p><strong>观察条件</strong>:</p>
+<li>观察明日开盘是否止跌企稳于3.335上方。</li>
+<li>观察创业板指是否有政策或国家队护盘信号。</li>
+<p><strong>置信度理由</strong>: 技术数据可用但部分指标受限，且市场情绪极端，置信度中。</p>
+<p><strong>数据限制</strong>:</p>
+<li>技术数据为partial，盘中实时指标未完全叠加。</li>
+<li>筹码分布缺失，无法评估主力成本。</li>
+<li>新闻结果数0，舆情判断依赖大盘场景。</li>
+<li>technical: partial</li>
+<h3>🎯 作战计划</h3>
+<p><strong>📍 操作点位</strong></p>
+<div style="overflow-x:auto"><table class="tbl"><thead><tr><th>操作点位</th><th>当前价</th></tr></thead><tbody>
+<tr><td>🎯 理想买入点</td><td>暂无理想买点，右侧需等MA5走平或站上MA20。</td></tr>
+<tr><td>🔵 次优买入点</td><td>暂无次优买点。</td></tr>
+<tr><td>🛑 止损位</td><td>持仓者若尚未离场，止损位设在3.335（今日最低点），跌破则继续减仓。</td></tr>
+<tr><td>🎊 目标位</td><td>反弹目标位：3.5316（MA5附近）。</td></tr>
+</tbody></table></div>
+<p><strong>💰 仓位建议</strong>: 空仓0成，持仓不超过1成。</p>
+<li>建仓策略: 空仓者不建仓；持仓者择机减仓至0.5成以下。</li>
+<li>风控策略: 严格止损，若跌破3.335无条件止损。</li>
+<p><strong>✅ 检查清单</strong></p>
+<li>❌ 检查项1：多头排列——不满足，空头排列。</li>
+<li>⚠️ 检查项2：乖离率合理（强势趋势可放宽）——乖离率-5%，绝对值超5%，危险。</li>
+<li>❌ 检查项3：量能配合——放量下跌，不配合。</li>
+<li>✅ 检查项4：无重大利空（ETF无公司利空）。</li>
+<li>⚠️ 检查项5：筹码健康——数据缺失。</li>
+<li>⚠️ 检查项6：PE估值合理——估值数据缺失。</li>
+<h3>🎯 信号归因分析</h3>
+<p><strong>归因权重</strong>:</p>
+<li>📈 技术指标: 60%</li>
+<li>📰 新闻舆情: 10%</li>
+<li>📊 基本面: 5%</li>
+<li>🌐 市场环境: 25%</li>
+<p><strong>🐂 最强看多信号</strong>: 无</p>
+<p><strong>🐻 最强看空信号</strong>: 空头排列+放量跌破所有均线</p>
+<hr>
+<p>*报告生成时间：2026-07-28 10:02:40*</p>
+<p>*分析模型：deepseek/deepseek-v4-flash*</p>
+</div></div></div>
+<footer>2026-07-28 18:02 · DeepSeek AI · 以上分析基于公开数据，不构成投资建议</footer></div></body></html>
