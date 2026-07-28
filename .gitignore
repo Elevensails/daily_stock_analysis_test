@@ -93,3 +93,5 @@ docs/specs/
 web/node_modules/
 web/dist/
 web/src/content/
+# Vite 构建期产生的临时配置缓存（vite.config.ts.timestamp-*.mjs）
+web/vite.config.*.mjs

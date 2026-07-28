@@ -38,7 +38,7 @@ export function el<K extends keyof HTMLElementTagNameMap>(
       node.setAttribute(k, v);
     }
   }
-  if (props.onClick) node.addEventListener('click', props.onClick);
+  if (props.onClick) node.addEventListener('click', props.onClick as EventListener);
   for (const c of children) {
     node.append(typeof c === 'string' ? document.createTextNode(c) : c);
   }
