@@ -74,4 +74,23 @@ jobs:
       - name: Deploy to GH Pages
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python3 scripts/deploy_pages.py
+        run: |
+          # Idempotently enable GitHub Pages using the workflow GITHUB_TOKEN
+          # (which carries `pages:write` via the job `permissions:` block). This
+          # is the primary enabler; the Python deploy below re-verifies and is
+          # the source of truth for the final status. Tolerates 409 (already
+          # enabled) and 403 (e.g. repo-level workflow-permission downgrade or a
+          # concurrent run) so the step never fails solely on the enable call.
+          if gh api -X POST "/repos/${GITHUB_REPOSITORY}/pages" \
+              -H "Accept: application/vnd.github+json" \
+              -f 'source[branch]=gh-pages' -f 'source[path]=/' -f 'build_type=legacy' >/dev/null 2>&1; then
+            echo "GitHub Pages enabled"
+          else
+            cur=$(gh api "/repos/${GITHUB_REPOSITORY}/pages" -H "Accept: application/vnd.github+json" --jq '.status' 2>/dev/null || true)
+            if [ "$cur" = "built" ] || [ "$cur" = "enabled" ]; then
+              echo "GitHub Pages enabled"
+            else
+              echo "GitHub Pages enable deferred to deploy script"
+            fi
+          fi
+          python3 scripts/deploy_pages.py

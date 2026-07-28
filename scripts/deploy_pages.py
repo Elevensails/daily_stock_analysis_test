@@ -286,14 +286,21 @@ def ensure_pages_enabled() -> bool:
     served, so the page still 404s. Idempotent: a 200 (already on), 201
     (just enabled) or 409 (concurrent enable) are all treated as success.
     The ``Accept: application/vnd.github+json`` header (set in HEADERS) is
-    required — without it the Pages API returns 403.
+    required — without it the Pages API returns 403 ("Resource not accessible
+    by integration") even when the token has ``pages: write``.
+
+    This uses the workflow-provided ``GITHUB_TOKEN`` (the ``TOKEN`` global,
+    sourced from the environment). The workflow sets
+    ``permissions: pages: write`` so that token carries the ``pages`` scope;
+    this is preferred over any long-lived PAT, which typically lacks the
+    ``pages`` scope and would 403.
 
     Returns ``True`` if Pages is enabled after this call.
     """
     pages_url = _api_url('/pages')
     status, _ = _gh_call(pages_url, 'GET')
     if status == 200:
-        print('  GitHub Pages already enabled')
+        print('  GitHub Pages enabled')
         return True
     if status == 404:
         body = {'source': {'branch': BRANCH, 'path': '/'}, 'build_type': 'legacy'}
@@ -302,8 +309,20 @@ def ensure_pages_enabled() -> bool:
             print('  GitHub Pages enabled (branch=gh-pages)')
             return True
         if p_status == 409:
-            print('  GitHub Pages already enabled (409)')
+            print('  GitHub Pages enabled (concurrent enable)')
             return True
+        if p_status == 403:
+            # The token may still lack pages:write at runtime (e.g. a repo-level
+            # "Workflow permissions" downgrade, or a transient race). Re-check:
+            # if Pages was enabled concurrently or by an external action, treat
+            # it as success rather than failing the whole deploy.
+            re_status, _ = _gh_call(pages_url, 'GET')
+            if re_status == 200:
+                print('  GitHub Pages enabled (verified after 403)')
+                return True
+            print('  WARNING: could not enable Pages (status=403); '
+                  'verify repo "Workflow permissions" grants pages:write')
+            return False
         print(f'  FAILED to enable Pages: status={p_status}')
         return False
     print(f'  skipping Pages enable, unexpected status={status}')
@@ -313,28 +332,29 @@ def ensure_pages_enabled() -> bool:
 def gh_put(path, content_str, sha=None):
     """Create or update a file on the gh-pages branch (first-deploy safe).
 
-    Before writing we read the current sha via ``GET /contents/{path}?ref=gh-pages``:
-      - 200 (file exists) → ``PUT`` with sha (update, exactly as before)
-      - 404 (file missing) → ``POST`` to create the file (first deploy / new page)
-    The caller may pass ``sha`` pre-fetched via ``gh_get_sha``; if omitted we
-    fetch it ourselves so the create-vs-update decision is always correct.
+    The GitHub Contents API exposes a SINGLE verb for both create and update:
+    ``PUT /repos/{owner}/{repo}/contents/{path}`` (201 created / 200 updated).
+    ``POST`` to that route is NOT supported and returns 404 — which previously
+    meant every first-deploy file write silently failed and the site 404'd.
+
+    We therefore ALWAYS use PUT. We read the current sha via
+    ``GET /contents/{path}?ref=gh-pages`` first; when the file already exists
+    we attach its ``sha`` (update), otherwise we omit it (create). The caller
+    may pass ``sha`` pre-fetched via ``gh_get_sha``; if omitted we fetch it.
     """
     b64 = base64.b64encode(content_str.encode('utf-8')).decode('ascii')
     if sha is None:
         sha = gh_get_sha(path)
+    payload = {'message': f'deploy {path}', 'content': b64, 'branch': BRANCH}
     if sha:
-        payload = {'message': f'deploy {path}', 'content': b64, 'branch': BRANCH, 'sha': sha}
-        method = 'PUT'
-    else:
-        # Create: POST (branch already exists after ensure_gh_pages_branch).
-        payload = {'message': f'deploy {path}', 'content': b64, 'branch': BRANCH}
-        method = 'POST'
-    req = urllib.request.Request(f'{API}/{path}', data=json.dumps(payload).encode('utf-8'), headers=HEADERS, method=method)
+        payload['sha'] = sha
+    # PUT is the only valid verb for create AND update on the Contents API.
+    req = urllib.request.Request(f'{API}/{path}', data=json.dumps(payload).encode('utf-8'), headers=HEADERS, method='PUT')
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return resp.status
     except urllib.error.HTTPError as e:
-        print(f'  HTTP {e.code} for {path} ({method})'); return e.code
+        print(f'  HTTP {e.code} for {path} (PUT)'); return e.code
 
 def gh_get_sha(path):
     try:
