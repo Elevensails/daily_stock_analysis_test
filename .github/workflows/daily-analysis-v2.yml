@@ -40,8 +40,21 @@ jobs:
         env:
           TIME_SLOT: ${{ inputs.time_slot }}
         run: python3 scripts/rename_reports.py
+      - name: Emit frontend content contract
+        run: python3 scripts/emit_frontend_artifacts.py
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build frontend (Vite MPA)
+        working-directory: web
+        run: npm ci && npm run build
       - name: XSS render gate
         run: python3 -m pytest tests/test_xss_escape.py -q
+      - name: Deploy target gate
+        run: python3 -m pytest tests/test_deploy_target.py -q
       - name: Ensure gh-pages orphan branch
         env:
           GITHUB_TOKEN: ${{ github.token }}
