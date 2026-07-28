@@ -42,6 +42,32 @@ jobs:
         run: python3 scripts/rename_reports.py
       - name: XSS render gate
         run: python3 -m pytest tests/test_xss_escape.py -q
+      - name: Ensure gh-pages orphan branch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # First-deploy bootstrap (route b): the Contents API can only *update*
+          # files, so on a brand-new repo the gh-pages branch must be created
+          # out-of-band. We push an orphan branch with a .nojekyll marker from a
+          # throwaway repo so the working tree (scripts/deploy_pages.py) is left
+          # intact for the Deploy step.
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
+            echo "gh-pages already exists on remote"
+            exit 0
+          fi
+          WD=$(mktemp -d)
+          git init "$WD"
+          cd "$WD"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git symbolic-ref HEAD refs/heads/gh-pages
+          printf '' > .nojekyll
+          git add .nojekyll
+          git commit -m "init gh-pages (nojekyll)"
+          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push origin gh-pages
       - name: Deploy to GH Pages
         env:
           GITHUB_TOKEN: ${{ github.token }}

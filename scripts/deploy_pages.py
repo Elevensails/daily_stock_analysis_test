@@ -18,7 +18,15 @@ BRANCH = 'gh-pages'
 # endpoints (which live outside the Contents API). Derived from API to keep a single
 # source of truth — API/BRANCH themselves stay unchanged (tests assert on them).
 REPO_API = API.rsplit('/contents', 1)[0]
-HEADERS = {'Authorization': f'Bearer {TOKEN}', 'Content-Type': 'application/json'}
+HEADERS = {
+    'Authorization': f'Bearer {TOKEN}',
+    'Content-Type': 'application/json',
+    # The Pages API (and several others) require this media-type header;
+    # without it the API returns 403 ("Resource not accessible by integration")
+    # even when the token has `pages: write`. This was the root cause of the
+    # "FAILED to enable Pages: status=403" on first deploy.
+    'Accept': 'application/vnd.github+json',
+}
 
 # ====== PREMIUM CSS DESIGN SYSTEM ======
 BASE_CSS = '''<style>
@@ -201,72 +209,105 @@ def _api_url(suffix: str) -> str:
     return REPO_API + suffix
 
 
-def ensure_gh_pages_branch() -> None:
-    """Ensure the gh-pages branch exists; create an empty orphan on first deploy.
+def ensure_gh_pages_branch() -> bool:
+    """Ensure the gh-pages branch exists; create an orphan on first deploy.
 
-    The Contents API ``PUT /contents/{path}`` only *updates* files. On the very
-    first run the gh-pages branch does not exist and no report files exist, so
-    every PUT returns HTTP 404, nothing is committed, the branch is never
-    created, and GitHub Pages 404s forever. We create an empty orphan branch via
-    the Git Data API before uploading any files.
+    First-deploy bootstrap: the Contents API ``PUT /contents/{path}`` only
+    *updates* files. When gh-pages does not yet exist, every PUT 404s, nothing
+    is committed, the branch is never created, and GitHub Pages 404s forever.
+    We create an orphan branch via the Git Data API *with a real ``.nojekyll``
+    blob* (a non-empty tree). The previous implementation posted an empty tree
+    (``{'tree': []}``) which GitHub rejects with HTTP **422**, so the branch was
+    never created. A non-empty tree avoids that.
+
+    The CI ``git`` step (route b) normally pre-creates the branch before this
+    script runs, so this is a robust fallback.
+
+    Returns ``True`` if the branch exists after this call (present or just
+    created), ``False`` if creation failed.
     """
     branches_url = _api_url(f'/branches/{BRANCH}')
     status, _ = _gh_call(branches_url, 'GET')
     if status == 200:
         print('  gh-pages branch already exists')
-        return
-    # 404 (or other) → create empty orphan via Git Data API.
-    print(f'  gh-pages branch missing (status={status}); creating empty orphan...')
+        return True
+    # 404 (or other) → create an orphan via the Git Data API.
+    print(f'  gh-pages branch missing (status={status}); creating orphan via Git Data API...')
     base = _api_url('')
-    # a. empty tree
-    t_status, tree_body = _gh_call(f'{base}/git/trees', 'POST', {'tree': []})
-    if t_status != 201 or not tree_body:
-        print(f'  FAILED to create tree: status={t_status}')
-        return
-    tree_sha = tree_body.get('sha')
-    # b. empty commit (no parents → orphan)
-    c_status, commit_body = _gh_call(
-        f'{base}/git/commits', 'POST',
-        {'message': 'init gh-pages', 'tree': tree_sha, 'parents': []},
+    # a. a .nojekyll blob (empty content) so the resulting tree is non-empty.
+    blob_status, blob_body = _gh_call(
+        f'{base}/git/blobs', 'POST',
+        {'content': '', 'encoding': 'utf-8'},
     )
-    if c_status != 201 or not commit_body:
-        print(f'  FAILED to create commit: status={c_status}')
-        return
+    if blob_status != 201 or not blob_body:
+        print(f'  FAILED to create .nojekyll blob: status={blob_status}')
+        return False
+    blob_sha = blob_body.get('sha')
+    # b. a tree containing that blob (non-empty → avoids the 422 on empty trees).
+    tree_status, tree_body = _gh_call(
+        f'{base}/git/trees', 'POST',
+        {'tree': [{'path': '.nojekyll', 'mode': '100644', 'type': 'blob', 'sha': blob_sha}]},
+    )
+    if tree_status != 201 or not tree_body:
+        print(f'  FAILED to create tree: status={tree_status}')
+        return False
+    tree_sha = tree_body.get('sha')
+    # c. an orphan commit (no parents).
+    commit_status, commit_body = _gh_call(
+        f'{base}/git/commits', 'POST',
+        {'message': 'init gh-pages (nojekyll)', 'tree': tree_sha, 'parents': []},
+    )
+    if commit_status != 201 or not commit_body:
+        print(f'  FAILED to create commit: status={commit_status}')
+        return False
     commit_sha = commit_body.get('sha')
-    # c. create the ref
-    r_status, _ = _gh_call(
+    # d. create the ref.
+    ref_status, _ = _gh_call(
         f'{base}/git/refs', 'POST',
         {'ref': f'refs/heads/{BRANCH}', 'sha': commit_sha},
     )
-    if r_status == 201:
+    if ref_status == 201:
         print(f'  gh-pages branch created (commit {str(commit_sha)[:8]})')
-    else:
-        print(f'  FAILED to create ref: status={r_status}')
+        return True
+    if ref_status == 422:
+        # Ref may already exist (concurrent run / race) — verify instead of fail.
+        verify_status, _ = _gh_call(branches_url, 'GET')
+        if verify_status == 200:
+            print('  gh-pages branch created (verified after 422)')
+            return True
+    print(f'  FAILED to create ref: status={ref_status}')
+    return False
 
 
-def ensure_pages_enabled() -> None:
+def ensure_pages_enabled() -> bool:
     """Enable GitHub Pages (serving gh-pages) if not already enabled.
 
     Without this the deployed files exist on gh-pages but the site is never
-    served, so the page still 404s. Idempotent: a 200 (already on) or 409
-    (concurrent enable) are both treated as success.
+    served, so the page still 404s. Idempotent: a 200 (already on), 201
+    (just enabled) or 409 (concurrent enable) are all treated as success.
+    The ``Accept: application/vnd.github+json`` header (set in HEADERS) is
+    required — without it the Pages API returns 403.
+
+    Returns ``True`` if Pages is enabled after this call.
     """
     pages_url = _api_url('/pages')
     status, _ = _gh_call(pages_url, 'GET')
     if status == 200:
         print('  GitHub Pages already enabled')
-        return
+        return True
     if status == 404:
         body = {'source': {'branch': BRANCH, 'path': '/'}, 'build_type': 'legacy'}
         p_status, _ = _gh_call(pages_url, 'POST', body)
         if p_status in (200, 201):
             print('  GitHub Pages enabled (branch=gh-pages)')
-        elif p_status == 409:
+            return True
+        if p_status == 409:
             print('  GitHub Pages already enabled (409)')
-        else:
-            print(f'  FAILED to enable Pages: status={p_status}')
-    else:
-        print(f'  skipping Pages enable, unexpected status={status}')
+            return True
+        print(f'  FAILED to enable Pages: status={p_status}')
+        return False
+    print(f'  skipping Pages enable, unexpected status={status}')
+    return False
 
 
 def gh_put(path, content_str, sha=None):
@@ -500,7 +541,9 @@ def main():
     now_ts = now.strftime('%Y-%m-%d %H:%M')
     md_files = sorted(glob.glob(os.path.join(reports_dir, '*.md')))
     print(f'Found {len(md_files)} MD files')
-    ensure_gh_pages_branch()  # first-deploy bootstrap: create gh-pages if missing
+    if not ensure_gh_pages_branch():  # first-deploy bootstrap / fallback
+        print('FATAL: could not ensure gh-pages branch exists')
+        raise SystemExit(1)
     reports_dict = {}
     for f in md_files:
         bn = os.path.basename(f)
@@ -545,7 +588,9 @@ def main():
     # Debug
     dbg={'md_files':len(md_files),'slots':list(reports_dict.keys())}
     gh_put('debug.json', json.dumps(dbg,indent=2))
-    ensure_pages_enabled()  # first-deploy bootstrap: turn on GitHub Pages
+    if not ensure_pages_enabled():  # first-deploy bootstrap: turn on GitHub Pages
+        print('FATAL: could not enable GitHub Pages')
+        raise SystemExit(1)
     print('deploy done')
 
 if __name__ == '__main__': main()
