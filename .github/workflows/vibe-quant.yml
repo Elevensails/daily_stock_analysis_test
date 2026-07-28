@@ -61,7 +61,16 @@ jobs:
           git add .nojekyll
           git commit -m "init gh-pages (nojekyll)"
           git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git push origin gh-pages
+          if ! git push origin gh-pages; then
+            # Race guard: if a concurrent workflow already created gh-pages,
+            # the orphan push is rejected (non-fast-forward) — that is fine.
+            if git ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
+              echo "gh-pages already created by a concurrent run; OK"
+              exit 0
+            fi
+            echo "FATAL: gh-pages push failed and branch is missing"
+            exit 1
+          fi
       - name: Deploy to GH Pages
         env:
           GITHUB_TOKEN: ${{ github.token }}
