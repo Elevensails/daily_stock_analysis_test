@@ -21,6 +21,7 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
+      - run: pip install -r requirements.txt
       - name: Compute time slot
         run: |
           TSLOT="${{ inputs.time_slot }}"
