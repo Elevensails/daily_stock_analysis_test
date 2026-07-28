@@ -1,0 +1,67 @@
+{
+  "schemaVersion": "1.0",
+  "generatedAt": "2026-07-28 21:08",
+  "model": "deepseek/deepseek-v4-flash",
+  "site": {
+    "title": "A股智能分析 · 决策仪表盘",
+    "base": "/daily_stock_analysis_test/"
+  },
+  "stats": {
+    "slotsPerDay": 5,
+    "holdings": 4,
+    "reportTypes": 3,
+    "monthlyCost": "~0"
+  },
+  "slots": {
+    "1200": {
+      "label": "12:00",
+      "name": "午间复盘",
+      "fragments": {
+        "report": null,
+        "market_review": null,
+        "vibe": null
+      }
+    },
+    "1430": {
+      "label": "14:30",
+      "name": "午盘追踪",
+      "fragments": {
+        "report": null,
+        "market_review": null,
+        "vibe": null
+      }
+    },
+    "1800": {
+      "label": "18:00",
+      "name": "收盘复盘",
+      "fragments": {
+        "report": null,
+        "market_review": null,
+        "vibe": "vibe_1800_20260728.html"
+      }
+    },
+    "0900": {
+      "label": "09:00",
+      "name": "早盘分析",
+      "fragments": {
+        "report": null,
+        "market_review": null,
+        "vibe": null
+      }
+    },
+    "0930": {
+      "label": "09:30",
+      "name": "开盘追踪",
+      "fragments": {
+        "report": null,
+        "market_review": null,
+        "vibe": null
+      }
+    }
+  },
+  "fragmentTypes": [
+    "report",
+    "market_review",
+    "vibe"
+  ]
+}
