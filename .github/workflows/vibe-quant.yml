@@ -28,6 +28,7 @@ jobs:
           fi
           echo "TSLOT=$TSLOT" >> $GITHUB_ENV
       - name: Run Vibe-Trading analysis
+        continue-on-error: true   # 已知 vibe-trading-ai 上游库在 CI 偶发崩溃(rc=1)，非致命：仍写出骨架报告并继续 Deploy
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           TIME_SLOT: ${{ env.TSLOT }}
