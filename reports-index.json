@@ -1,7 +1,8 @@
 {
   "schemaVersion": "1.0",
-  "updatedAt": "2026-07-28 21:12",
+  "updatedAt": "2026-07-29 08:57",
   "dates": [
+    "20260729",
     "20260728"
   ],
   "entries": {
@@ -13,6 +14,15 @@
         "vibe_1800_20260728.html",
         "report_1800_20260728.html",
         "market_review_1800_20260728.html"
+      ]
+    },
+    "20260729": {
+      "slots": [
+        "0900"
+      ],
+      "fragments": [
+        "report_0900_20260729.html",
+        "market_review_0900_20260729.html"
       ]
     }
   }
