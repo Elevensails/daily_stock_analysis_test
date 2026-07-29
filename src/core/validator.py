@@ -30,6 +30,7 @@ __all__ = [
     "JudgeConfig",
     "validate",
     "gate_report",
+    "append_reject_record",
 ]
 
 
@@ -287,8 +288,15 @@ def gate_report(
     log_path: str = "logs/judge_rejects.jsonl",
     context: Optional[dict] = None,
     llm_judge: Optional[Callable[..., dict]] = None,
+    log: bool = True,
 ) -> ValidationResult:
     """校验一份报告；若不通过，把拒绝原因追加写入 ``log_path`` 并返回结果。
+
+    参数
+    ----
+    log: 为 ``True``（默认）时保持原行为——判定不通过后写 jsonl；
+        为 ``False`` 时仅做校验、不写日志（由调用方自行控制终态记录，
+        例如 emit 接入 repair loop 后写带 repair 字段的终态记录）。
 
     返回 :class:`ValidationResult`，调用方据此决定是否发布（如 emit 阶段跳过）。
     """
@@ -300,22 +308,29 @@ def gate_report(
         config=config,
         llm_judge=llm_judge,
     )
-    if not result.passed:
+    if not result.passed and log:
         _append_reject(log_path, report_kind, result, context)
     return result
 
 
-def _append_reject(
+def append_reject_record(
     log_path: str,
     report_kind: str,
     result: ValidationResult,
-    context: Optional[dict],
+    context: Optional[dict] = None,
+    **extra: object,
 ) -> None:
-    """把拒绝记录追加写入 jsonl（失败静默，不阻断主流程）。"""
+    """把一条拒绝/终态记录追加写入 jsonl（失败静默，不阻断主流程）。
+
+    在原有 ``ts/kind/passed/score/reasons/checks/context`` 字段基础上，
+    合并任意 ``**extra`` 字段（如 repair loop 的 ``repair_rounds`` /
+    ``rewritten`` / ``final_action`` / ``repair_reasons``），供 emit 写
+    带 repair 语义的终态记录。旧字段结构保持兼容。
+    """
     try:
         p = Path(log_path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        rec = {
+        rec: dict = {
             "ts": datetime.now(timezone.utc).isoformat(),
             "kind": report_kind,
             "passed": result.passed,
@@ -324,8 +339,21 @@ def _append_reject(
             "checks": [asdict(c) for c in result.checks],
             "context": context or {},
         }
+        # 合并 repair 相关扩展字段（不覆盖上述核心字段）
+        for k, v in extra.items():
+            rec[k] = v
         with p.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except Exception:
         # gate 日志失败绝不应影响主流程发布
         pass
+
+
+def _append_reject(
+    log_path: str,
+    report_kind: str,
+    result: ValidationResult,
+    context: Optional[dict],
+) -> None:
+    """（内部兼容包装）把拒绝记录追加写入 jsonl；委托 :func:`append_reject_record`。"""
+    append_reject_record(log_path, report_kind, result, context)

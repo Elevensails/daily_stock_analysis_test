@@ -30,7 +30,7 @@ from deploy_pages import md2html, nearest_slot
 
 # 让 scripts/ 下的脚本能 import src.core.validator（repo root 注入 sys.path）。
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from src.core.validator import gate_report, JudgeConfig  # noqa: E402
+from src.core.validator import gate_report, JudgeConfig, append_reject_record  # noqa: E402
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
@@ -79,6 +79,30 @@ def _load_source_facts(md_path: str) -> "dict | None":
 
 
 
+def _save_repaired(bn: str, text: str) -> None:
+    """修复成功发布的报告另存 ``logs/repaired/<bn>.md`` 备查（不放 reports/）。
+
+    置于 ``logs/repaired/`` 而非 ``reports/``，避免下一轮 emit 把它当成新报告重新处理。
+    """
+    try:
+        out_dir = os.path.join(_ROOT, "logs", "repaired")
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, bn), "w", encoding="utf-8") as fh:
+            fh.write(text)
+    except OSError:
+        pass  # 落盘失败不影响发布主流程
+
+
+def _resolve_llm_judge():
+    """P1-2 预留：解析真实 LLM judge callable。
+
+    本轮不强制激活真实 DeepSeek judge，返回 ``None``；后续可在 ``JUDGE_USE_LLM=1``
+    时在此注入真实 judge（签名 ``(text, *, report_kind, source_facts) -> dict``），
+    供 repair 重写作为可选修正信号源。
+    """
+    return None
+
+
 def _init_slots() -> "dict[str, dict]":
     """预填充 5 个时段骨架，缺失片段显式置 null（前端据此渲染「待生成」）。"""
     return {
@@ -90,12 +114,33 @@ def _init_slots() -> "dict[str, dict]":
 def main() -> int:
     reports_dir = os.environ.get("REPORTS_DIR", os.path.join(_ROOT, "reports"))
     model = os.environ.get("LITELLM_MODEL", "deepseek/deepseek-v4-flash")
+    # U3 repair loop 配置（环境变量可覆盖，均有默认值）
+    repair_max = min(int(os.environ.get("REPAIR_MAX_ROUNDS", "2")), 3)  # 硬上限 3
+    repair_model = os.environ.get("REPAIR_MODEL") or model
+    repair_temp = float(os.environ.get("REPAIR_TEMPERATURE", "0.1"))
     os.makedirs(_FRAG_DIR, exist_ok=True)
+
+    # lazy import：repair 核心 + analyzer 重写封装（避免顶层强拉 analyzer 巨型模块）
+    repair_fn = None
+    rewrite_fn = None
+    try:
+        from src.core.repair import repair_report
+        from src.analyzer import call_rewrite_llm
+
+        repair_fn = repair_report
+        rewrite_fn = call_rewrite_llm
+    except Exception as exc:  # repair 不可用 → 回退原 reject 行为
+        print(
+            f"  WARN: repair loop unavailable ({exc}); "
+            "failing reports will be rejected as before"
+        )
 
     slots = _init_slots()
     md_files = sorted(glob.glob(os.path.join(reports_dir, "*.md")))
     emitted = 0
     rejected = 0
+
+    log_path = os.path.join(_ROOT, "logs", "judge_rejects.jsonl")
 
     for f in md_files:
         bn = os.path.basename(f)
@@ -120,7 +165,7 @@ def main() -> int:
             print(f"  skip (read error): {bn}: {exc}")
             continue
 
-        # ---- U3 事后校验 gate：fail 不发布到 GH Pages ----
+        # ---- U3 事后校验 gate：首轮仅校验、不写 jsonl（log=False）----
         source_facts = _load_source_facts(f)
         jres = gate_report(
             md,
@@ -128,22 +173,92 @@ def main() -> int:
             report_kind=matched_type,
             config=_JUDGE_CONFIG,
             context={"file": bn},
+            log=False,
         )
-        if not jres.passed:
+
+        if jres.passed:
+            # 首轮通过：照旧 emit，不进 repair loop（repair_rounds=0）
+            frag = md2html(md)  # XSS 安全：文本节点均已 html.escape
+            fname = f"{matched_type}_{hmm}_{date}.html"
+            with open(os.path.join(_FRAG_DIR, fname), "w", encoding="utf-8") as fh:
+                fh.write(frag)
+            slots[slot]["fragments"][matched_type] = fname
+            emitted += 1
+            print(f"  emitted {fname}")
+            continue
+
+        # ---- 首轮 fail：进入 repair loop（若 repair 可用）----
+        if repair_fn is not None and rewrite_fn is not None:
+            # P1-2：LLM judge 注入通道（本轮不强制激活真实 judge，默认值 None）
+            llm_judge = _resolve_llm_judge() if _JUDGE_CONFIG.use_llm else None
+            rres = repair_fn(
+                md,
+                reasons=jres.reasons,
+                source_facts=source_facts,
+                report_kind=matched_type,
+                model=repair_model,
+                max_rounds=repair_max,
+                llm_call=rewrite_fn,
+                config=_JUDGE_CONFIG,
+                llm_judge=llm_judge,
+                temperature=repair_temp,
+            )
+            if rres.final_action == "emit":
+                # 修复成功：落盘 logs/repaired/<bn>.md 备查（不放 reports/）
+                _save_repaired(bn, rres.final_text)
+                frag = md2html(rres.final_text)
+                fname = f"{matched_type}_{hmm}_{date}.html"
+                with open(os.path.join(_FRAG_DIR, fname), "w", encoding="utf-8") as fh:
+                    fh.write(frag)
+                slots[slot]["fragments"][matched_type] = fname
+                emitted += 1
+                print(f"  emitted (repaired, rounds={rres.rounds}) {fname}")
+                append_reject_record(
+                    log_path,
+                    matched_type,
+                    jres,
+                    context={"file": bn},
+                    final_action="emit",
+                    repair_rounds=rres.rounds,
+                    rewritten=rres.rewritten,
+                    repair_reasons=rres.repair_reasons,
+                )
+                continue
+            # repair 超限/降级：回退 reject（写 final_action=reject 终态记录）
             rejected += 1
             print(
-                f"  JUDGE REJECT {bn} (score={jres.score:.2f}): "
+                f"  JUDGE REJECT (after repair, rounds={rres.rounds}) {bn}: "
                 + "; ".join(jres.reasons)
             )
-            continue  # 跳过往前端 emit → 不发布
+            append_reject_record(
+                log_path,
+                matched_type,
+                jres,
+                context={"file": bn},
+                final_action="reject",
+                repair_rounds=rres.rounds,
+                rewritten=rres.rewritten,
+                repair_reasons=rres.repair_reasons,
+            )
+            continue
 
-        frag = md2html(md)  # XSS 安全：文本节点均已 html.escape
-        fname = f"{matched_type}_{hmm}_{date}.html"
-        with open(os.path.join(_FRAG_DIR, fname), "w", encoding="utf-8") as fh:
-            fh.write(frag)
-        slots[slot]["fragments"][matched_type] = fname
-        emitted += 1
-        print(f"  emitted {fname}")
+        # ---- repair 不可用：回退原 reject 行为（仅写一条 reject 记录）----
+        rejected += 1
+        print(
+            f"  JUDGE REJECT {bn} (score={jres.score:.2f}): "
+            + "; ".join(jres.reasons)
+        )
+        append_reject_record(
+            log_path,
+            matched_type,
+            jres,
+            context={"file": bn},
+            final_action="reject",
+            repair_rounds=0,
+            rewritten=False,
+            repair_reasons=jres.reasons,
+        )
+        continue
 
     manifest = {
         "schemaVersion": "1.0",
