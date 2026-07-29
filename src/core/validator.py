@@ -118,7 +118,7 @@ def _check_internal_consistency(text: str) -> CheckResult:
                 "critical",
             )
     if _LIMIT_DOWN_RE.search(text):
-        pos = re.search(r"[+\-]?\d{1,2}(?:\.\d+)?\s*%", text)
+        pos = re.search(r"([+\-]?\d{1,2}(?:\.\d+)?)\s*%", text)
         # 跌停股同篇出现明显正收益，视为矛盾
         if pos and float(pos.group(1)) > 0:
             return CheckResult(
