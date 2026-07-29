@@ -1,10 +1,19 @@
 /* ==========================================================================
  * 实时盯盘页：移植原 dashboard.html 的东方财富 push2 拉取 + 30s 刷新逻辑，
  * 套用共享外壳、设计令牌与 .up/.down 语义色（涨红跌绿）+ 主题切换。
+ *
+ * 设计要点（BugFix）：
+ *  - f2/f3 已按 push2 约定 ÷100（价格/涨跌幅真实值）；
+ *  - fetchJSON 带 8s 超时与错误处理；
+ *  - 首次加载显示骨架屏；失败时显示具体错误 + 重试按钮；
+ *  - 各板块（指数 / 持仓 / 板块涨幅 / 主力净流入）独立加载态，单一接口失败不影响其余；
+ *  - 30s 自动刷新期间显示「更新中...」，避免用户误以为卡住。
  * ========================================================================== */
 import { el, clear } from '../dom';
 import { pageHeader } from '../components/cards';
+import { fetchJSON, nowTs } from '../components/quote';
 
+/** 持仓标的（代码 -> 名称）。 */
 const STOCKS: Record<string, string> = {
   '600036': '招商银行',
   '159915': '创业板ETF',
@@ -14,123 +23,145 @@ const STOCKS: Record<string, string> = {
   '512400': '有色ETF',
 };
 
-function pad(n: number): string {
-  return n < 10 ? '0' + n : '' + n;
-}
-function nowTs(): string {
-  const d = new Date();
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(
-    d.getMinutes()
-  )}:${pad(d.getSeconds())}`;
-}
-function fetchJSON(url: string): Promise<unknown> {
-  return new Promise((resolve) => {
-    const x = new XMLHttpRequest();
-    x.open('GET', url, true);
-    x.onreadystatechange = function () {
-      if (x.readyState === 4) {
-        try {
-          resolve(x.status === 200 ? JSON.parse(x.responseText) : null);
-        } catch {
-          resolve(null);
-        }
-      }
-    };
-    x.send();
-  });
-}
-function col(chg: number): string {
-  return chg >= 0 ? 'up' : 'down';
-}
-function sign(chg: number): string {
-  return chg >= 0 ? '+' : '';
+/** push2 接口地址（f2/f3 为 ×100 整型，渲染时已 ÷100）。 */
+const IDX_URL =
+  'https://push2.eastmoney.com/api/qt/ulist.np/get?fields=f2,f3,f4,f12,f14&secids=1.000001,0.399001,0.399006';
+const QUOTE_CODES = Object.keys(STOCKS)
+  .map((c) => (c.startsWith('6') ? '1' : '0') + '.' + c)
+  .join(',');
+const QUOTE_URL = `https://push2.eastmoney.com/api/qt/ulist.np/get?fields=f2,f3,f4,f12,f14&secids=${QUOTE_CODES}`;
+const SECTOR_URL =
+  'https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=8&po=1&np=1&fields=f2,f3,f12,f14&fid=f3&fs=m:90+t:2';
+const INFLOW_URL =
+  'https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=8&po=1&np=1&fields=f12,f14,f62&fid=f62&fs=m:90+t:2';
+
+interface ApiItem {
+  f2?: string | number;
+  f3?: string | number;
+  f12?: string;
+  f14?: string;
+  f62?: string | number;
 }
 
-async function fetchQuote(root: HTMLElement): Promise<void> {
-  const idxGrid = root.querySelector('#idx-grid') as HTMLElement | null;
-  const holdGrid = root.querySelector('#hold-grid') as HTMLElement | null;
-  const sectorTop = root.querySelector('#sector-top') as HTMLElement | null;
-  const inflowTop = root.querySelector('#inflow-top') as HTMLElement | null;
-  const tsEl = root.querySelector('#dash-ts') as HTMLElement | null;
-  if (!idxGrid || !holdGrid || !sectorTop || !inflowTop) return;
+/** 渲染指数/持仓卡片（DOM 构建，textContent 注入，天然 XSS 安全）。 */
+function renderQuoteCards(container: HTMLElement, items: ApiItem[] | null | undefined, isIdx: boolean): void {
+  clear(container);
+  if (!items || items.length === 0) {
+    container.append(el('div', { class: 'dash-empty', text: '暂无数据' }));
+    return;
+  }
+  const base = isIdx ? 'idx-card' : 'hold-card';
+  const nCls = isIdx ? 'n' : 'hn';
+  const pCls = isIdx ? 'p' : 'hp';
+  const cCls = isIdx ? 'c' : 'hm';
+  for (const it of items) {
+    const price = Number(it.f2) / 100;
+    const chg = Number(it.f3) / 100;
+    const up = chg >= 0;
+    container.append(
+      el('div', { class: base }, [
+        el('div', { class: nCls, text: String(it.f14 ?? '') }),
+        el('div', { class: `${pCls} ${up ? 'up' : 'down'}`, text: price.toFixed(2) }),
+        el('div', { class: `${cCls} ${up ? 'up' : 'down'}`, text: `${up ? '+' : ''}${chg.toFixed(2)}%` }),
+      ])
+    );
+  }
+}
 
-  const codes = Object.keys(STOCKS)
-    .map((c) => (c.startsWith('6') ? '1' : '0') + '.' + c)
-    .join(',');
-  const quoteUrl = `https://push2.eastmoney.com/api/qt/ulist.np/get?fields=f2,f3,f4,f12,f14&secids=${codes}`;
-  const idxCodes = '1.000001,0.399001,0.399006';
-  const idxUrl = `https://push2.eastmoney.com/api/qt/ulist.np/get?fields=f2,f3,f4,f12,f14&secids=${idxCodes}`;
-  const sectorUrl =
-    'https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=8&po=1&np=1&fields=f2,f3,f12,f14&fid=f3&fs=m:90+t:2';
-  const inflowUrl =
-    'https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=8&po=1&np=1&fields=f12,f14,f62&fid=f62&fs=m:90+t:2';
-
-  const [quote, idx, sector, inflow] = (await Promise.all([
-    fetchJSON(quoteUrl),
-    fetchJSON(idxUrl),
-    fetchJSON(sectorUrl),
-    fetchJSON(inflowUrl),
-  ])) as any[];
-
-  const renderCards = (container: HTMLElement, isIdx: boolean, items: any[]): void => {
-    let html = '';
-    for (const it of items || []) {
-      const chg = Number(it.f3);
-      const base = isIdx ? 'idx-card' : 'hold-card';
-      const n = isIdx ? 'n' : 'hn';
-      const p = isIdx ? 'p' : 'hp';
-      const c = isIdx ? 'c' : 'hm';
-      html += `<div class="${base}">
-        <div class="${n}">${it.f14}</div>
-        <div class="${p} ${col(chg)}">${Number(it.f2).toFixed(2)}</div>
-        <div class="${c} ${col(chg)}">${sign(chg)}${chg.toFixed(2)}%</div>
-      </div>`;
+/** 渲染板块涨幅 / 主力净流入的条形列表（DOM 构建，textContent 注入）。 */
+function renderBarList(
+  container: HTMLElement,
+  items: ApiItem[] | null | undefined,
+  mode: 'sector' | 'inflow'
+): void {
+  clear(container);
+  if (!items || items.length === 0) {
+    container.append(el('div', { class: 'dash-empty', text: '暂无数据' }));
+    return;
+  }
+  let max = 0;
+  for (const it of items) {
+    const abs = Math.abs(mode === 'sector' ? Number(it.f3) : Number(it.f62));
+    if (abs > max) max = abs;
+  }
+  if (max === 0) {
+    container.append(el('div', { class: 'dash-empty', text: '暂无数据' }));
+    return;
+  }
+  for (const it of items) {
+    let value: number;
+    let display: string;
+    if (mode === 'sector') {
+      value = Number(it.f3) / 100; // 涨跌幅（真实百分比）
+      display = `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`;
+    } else {
+      value = Number(it.f62) / 1e8; // 主力净流入（亿元）
+      display = `${value >= 0 ? '+' : ''}${value.toFixed(2)}亿`;
     }
-    container.innerHTML = html || '<div class="dash-empty">数据加载失败</div>';
-  };
+    const w = Math.min(100, (Math.abs(mode === 'sector' ? Number(it.f3) : Number(it.f62)) / max) * 100);
+    const up = value >= 0;
+    container.append(
+      el('div', { class: 'bar' }, [
+        el('span', { class: 'bn', text: String(it.f14 ?? '') }),
+        el('span', { class: 'bbar' }, [
+          el('span', {
+            class: 'bt',
+            attrs: { style: `width:${w.toFixed(0)}%;background:${up ? 'var(--up)' : 'var(--down)'}` },
+          }),
+        ]),
+        el('span', { class: `bv ${up ? 'up' : 'down'}`, text: display }),
+      ])
+    );
+  }
+}
 
-  renderCards(holdGrid, false, quote?.data?.diff);
-  renderCards(idxGrid, true, idx?.data?.diff);
+/** 骨架屏占位（首次加载）。 */
+function showSkeleton(container: HTMLElement, kind: 'card' | 'bar', count = 4): void {
+  clear(container);
+  for (let i = 0; i < count; i++) {
+    container.append(el('div', { class: kind === 'card' ? 'skeleton-card' : 'skeleton-bar' }));
+  }
+}
 
-  const sItems = (sector?.data?.diff as any[]) || [];
-  let maxS = 0;
-  sItems.forEach((it) => {
-    const v = Math.abs(Number(it.f3));
-    if (v > maxS) maxS = v;
-  });
-  sectorTop.innerHTML =
-    sItems
-      .map((it) => {
-        const w = maxS > 0 ? (Math.abs(Number(it.f3)) / maxS) * 100 : 0;
-        const c = Number(it.f3);
-        return `<div class="bar"><span class="bn">${it.f14}</span><span class="bbar"><span class="bt" style="width:${w.toFixed(
-          0
-        )}%;background:${c >= 0 ? 'var(--up)' : 'var(--down)'}"></span></span><span class="bv ${col(
-          c
-        )}">${sign(c)}${c.toFixed(2)}%</span></div>`;
-      })
-      .join('') || '<div class="dash-empty">数据加载失败</div>';
+/** 错误态 + 重试按钮（调用方提供重试回调）。 */
+function showError(container: HTMLElement, message: string, onRetry: () => void): void {
+  clear(container);
+  container.append(
+    el('div', { class: 'state-box state-box--error' }, [
+      el('div', { class: 'state-box__icon', text: '⚠️' }),
+      el('div', { class: 'state-box__title', text: message }),
+      el('button', { class: 'retry-btn', text: '重试', onClick: onRetry }),
+    ])
+  );
+}
 
-  const iItems = (inflow?.data?.diff as any[]) || [];
-  let maxI = 0;
-  iItems.forEach((it) => {
-    const v = Math.abs(Number(it.f62));
-    if (v > maxI) maxI = v;
-  });
-  inflowTop.innerHTML =
-    iItems
-      .map((it) => {
-        const v = Number(it.f62) / 1e8;
-        const w = maxI > 0 ? (Math.abs(Number(it.f62)) / maxI) * 100 : 0;
-        return `<div class="bar"><span class="bn">${it.f14}</span><span class="bbar"><span class="bt" style="width:${w.toFixed(
-          0
-        )}%;background:${v >= 0 ? 'var(--up)' : 'var(--down)'}"></span></span><span class="bv ${col(
-          v
-        )}">${sign(v)}${v.toFixed(2)}亿</span></div>`;
-      })
-      .join('') || '<div class="dash-empty">数据加载失败</div>';
-
-  if (tsEl) tsEl.textContent = `更新时间: ${nowTs()} · 30 秒后自动刷新`;
+/**
+ * 加载单个板块：首屏显示骨架屏；刷新阶段进入「更新中」态（保留既有内容），
+ * 成功后渲染，失败则渲染错误态 + 重试。返回 Promise 便于聚合 allSettled。
+ */
+function loadSection(
+  container: HTMLElement,
+  fetchFn: () => Promise<unknown>,
+  renderFn: (data: any) => void,
+  opts: { initial: boolean; onRetry: () => void }
+): Promise<void> {
+  const isInitial = opts.initial && !container.dataset.loaded;
+  if (isInitial) {
+    showSkeleton(container, container.id === 'sector-top' || container.id === 'inflow-top' ? 'bar' : 'card');
+    container.dataset.loaded = '1';
+  } else {
+    container.classList.add('is-updating');
+  }
+  return fetchFn()
+    .then((data) => {
+      renderFn(data);
+      container.dataset.loaded = '1';
+      container.classList.remove('is-updating');
+    })
+    .catch((err: Error) => {
+      container.classList.remove('is-updating');
+      showError(container, err?.message || '数据拉取失败，请检查网络', opts.onRetry);
+    });
 }
 
 export function renderDashboard(root: HTMLElement): void {
@@ -158,10 +189,49 @@ export function renderDashboard(root: HTMLElement): void {
   root.append(grid);
   root.append(el('div', { class: 'dash-empty', id: 'dash-ts', text: '加载中...' }));
 
-  const run = (): void => {
-    void fetchQuote(root).catch(() => {});
+  const idxGrid = root.querySelector('#idx-grid') as HTMLElement | null;
+  const holdGrid = root.querySelector('#hold-grid') as HTMLElement | null;
+  const sectorTop = root.querySelector('#sector-top') as HTMLElement | null;
+  const inflowTop = root.querySelector('#inflow-top') as HTMLElement | null;
+  const tsEl = root.querySelector('#dash-ts') as HTMLElement | null;
+  if (!idxGrid || !holdGrid || !sectorTop || !inflowTop) return;
+
+  const loadIdx = (initial: boolean): Promise<void> =>
+    loadSection(
+      idxGrid,
+      () => fetchJSON(IDX_URL),
+      (d) => renderQuoteCards(idxGrid, (d as any)?.data?.diff, true),
+      { initial, onRetry: () => void loadIdx(false) }
+    );
+  const loadHold = (initial: boolean): Promise<void> =>
+    loadSection(
+      holdGrid,
+      () => fetchJSON(QUOTE_URL),
+      (d) => renderQuoteCards(holdGrid, (d as any)?.data?.diff, false),
+      { initial, onRetry: () => void loadHold(false) }
+    );
+  const loadSector = (initial: boolean): Promise<void> =>
+    loadSection(
+      sectorTop,
+      () => fetchJSON(SECTOR_URL),
+      (d) => renderBarList(sectorTop, (d as any)?.data?.diff, 'sector'),
+      { initial, onRetry: () => void loadSector(false) }
+    );
+  const loadInflow = (initial: boolean): Promise<void> =>
+    loadSection(
+      inflowTop,
+      () => fetchJSON(INFLOW_URL),
+      (d) => renderBarList(inflowTop, (d as any)?.data?.diff, 'inflow'),
+      { initial, onRetry: () => void loadInflow(false) }
+    );
+
+  const refreshAll = async (initial: boolean): Promise<void> => {
+    if (!initial && tsEl) tsEl.textContent = '更新中...';
+    await Promise.allSettled([loadIdx(initial), loadHold(initial), loadSector(initial), loadInflow(initial)]);
+    if (tsEl) tsEl.textContent = `更新时间: ${nowTs()} · 30 秒后自动刷新`;
   };
-  run();
-  const timer = window.setInterval(run, 30000);
+
+  void refreshAll(true);
+  const timer = window.setInterval(() => void refreshAll(false), 30000);
   window.addEventListener('beforeunload', () => window.clearInterval(timer));
 }
