@@ -21,11 +21,16 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import json
 import glob
 from datetime import datetime, timezone, timedelta
 
 from deploy_pages import md2html, nearest_slot
+
+# 让 scripts/ 下的脚本能 import src.core.validator（repo root 注入 sys.path）。
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from src.core.validator import gate_report, JudgeConfig  # noqa: E402
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
@@ -50,6 +55,29 @@ TYPE_PATTERNS = {
     "vibe": re.compile(r"^vibe_(\d{4})_(\d{8})\.md$"),
 }
 
+# ---- U3 事后校验 gate 配置（环境变量可覆盖，默认开启、不启用 LLM）----
+_JUDGE_CONFIG = JudgeConfig(
+    enabled=os.environ.get("JUDGE_ENABLED", "1") != "0",
+    use_llm=os.environ.get("JUDGE_USE_LLM", "0") == "1",
+)
+
+
+def _load_source_facts(md_path: str) -> "dict | None":
+    """加载可选的数字源核对侧车文件 ``<stem>.facts.json``。
+
+    由分析阶段写入（含 is_limit_up / is_limit_down / price 等），存在则
+    启用「关键数字与行情源核对」；缺失则跳过该项（启发式检查照常）。
+    """
+    sidecar = md_path[: md_path.rfind(".")] + ".facts.json"
+    if not os.path.exists(sidecar):
+        return None
+    try:
+        with open(sidecar, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 
 def _init_slots() -> "dict[str, dict]":
     """预填充 5 个时段骨架，缺失片段显式置 null（前端据此渲染「待生成」）。"""
@@ -67,6 +95,7 @@ def main() -> int:
     slots = _init_slots()
     md_files = sorted(glob.glob(os.path.join(reports_dir, "*.md")))
     emitted = 0
+    rejected = 0
 
     for f in md_files:
         bn = os.path.basename(f)
@@ -90,6 +119,23 @@ def main() -> int:
         except OSError as exc:
             print(f"  skip (read error): {bn}: {exc}")
             continue
+
+        # ---- U3 事后校验 gate：fail 不发布到 GH Pages ----
+        source_facts = _load_source_facts(f)
+        jres = gate_report(
+            md,
+            source_facts=source_facts,
+            report_kind=matched_type,
+            config=_JUDGE_CONFIG,
+            context={"file": bn},
+        )
+        if not jres.passed:
+            rejected += 1
+            print(
+                f"  JUDGE REJECT {bn} (score={jres.score:.2f}): "
+                + "; ".join(jres.reasons)
+            )
+            continue  # 跳过往前端 emit → 不发布
 
         frag = md2html(md)  # XSS 安全：文本节点均已 html.escape
         fname = f"{matched_type}_{hmm}_{date}.html"
@@ -119,6 +165,10 @@ def main() -> int:
     with open(os.path.join(_CONTENT_DIR, "manifest.json"), "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, ensure_ascii=False, indent=2)
     print(f"wrote manifest.json ({emitted} fragments)")
+    if rejected:
+        print(
+            f"JUDGE_REJECTS={rejected}  (已拦截不发布，原因见 logs/judge_rejects.jsonl)"
+        )
     print("emit done")
     return 0
 

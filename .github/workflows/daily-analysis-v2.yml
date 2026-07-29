@@ -42,6 +42,27 @@ jobs:
         run: python3 scripts/rename_reports.py
       - name: Emit frontend content contract
         run: python3 scripts/emit_frontend_artifacts.py
+      - name: Judge gate summary
+        if: always()
+        run: |
+          if [ -f logs/judge_rejects.jsonl ]; then
+            N=$(wc -l < logs/judge_rejects.jsonl | tr -d ' ')
+          else
+            N=0
+          fi
+          echo "JUDGE_REJECTS=$N"
+          if [ "$N" -gt 0 ]; then
+            echo "::warning::Judge 拦截 $N 份报告，已不发布（原因见 logs/judge_rejects.jsonl），待人工复核"
+          else
+            echo "Judge 未拦截任何报告"
+          fi
+      - name: Upload judge rejects
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: judge-rejects
+          path: logs/judge_rejects.jsonl
+          if-no-files-found: ignore
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
