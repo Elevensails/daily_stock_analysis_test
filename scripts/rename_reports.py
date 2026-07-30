@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Rename report files with time-slot labels for deploy_pages.py.
 Accepts TIME_SLOT env var for manual triggers (e.g. TIME_SLOT=0930)."""
-import os, glob, shutil
+import os, sys, glob, shutil
 from datetime import datetime, timezone, timedelta
 
 # U16：允许直接以脚本方式运行（scripts/ 下）时也能 import src 配置层。
