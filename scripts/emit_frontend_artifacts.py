@@ -115,7 +115,7 @@ def main() -> int:
     reports_dir = os.environ.get("REPORTS_DIR", os.path.join(_ROOT, "reports"))
     model = os.environ.get("LITELLM_MODEL", "deepseek/deepseek-v4-flash")
     # U3 repair loop 配置（环境变量可覆盖，均有默认值）
-    repair_max = min(int(os.environ.get("REPAIR_MAX_ROUNDS", "2")), 3)  # 硬上限 3
+    repair_max = min(int(os.environ.get("REPAIR_MAX_ROUNDS", "1")), 3)  # 硬上限 3
     repair_model = os.environ.get("REPAIR_MODEL") or model
     repair_temp = float(os.environ.get("REPAIR_TEMPERATURE", "0.1"))
     os.makedirs(_FRAG_DIR, exist_ok=True)
