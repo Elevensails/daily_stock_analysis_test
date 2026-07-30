@@ -9,9 +9,13 @@ so this file carries no analysis or presentation logic.
 Constants `API` / `BRANCH` and the `gh_*` helpers are preserved unchanged —
 `tests/test_deploy_target.py` and `tests/test_xss_escape.py` depend on them.
 """
-import os, re, base64, json, html, urllib.request, urllib.error, glob
+import os, sys, re, base64, json, html, urllib.request, urllib.error, glob
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
+
+# 让 `python scripts/deploy_pages.py` 直接运行时也能找到 `src/` 包
+# （CI 容器中脚本目录被加到 sys.path，但 src/ 在 repo 根，必须显式注入）
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 TOKEN = os.environ.get('GITHUB_TOKEN', '')
 # import 守卫：仅作为脚本直接运行时才校验 token，避免 offline 单元测试在
