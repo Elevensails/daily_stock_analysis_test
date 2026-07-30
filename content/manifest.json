@@ -1,6 +1,6 @@
 {
   "schemaVersion": "1.0",
-  "generatedAt": "2026-07-30 08:57",
+  "generatedAt": "2026-07-30 09:27",
   "model": "deepseek/deepseek-v4-flash",
   "site": {
     "title": "A股智能分析 · 决策仪表盘",
@@ -55,7 +55,7 @@
       "fragments": {
         "report": null,
         "market_review": null,
-        "vibe": null
+        "vibe": "vibe_0930_20260730.html"
       }
     }
   },
