@@ -564,7 +564,9 @@ def _cleanup_stale(dist_dir):
 
 # ====== MAIN (PURE DIST PUSHER) ======
 def main():
-    dist_dir = os.environ.get('DIST_DIR', os.path.join('web', 'dist'))
+    from src.config import get_config
+    cfg = get_config()
+    dist_dir = os.environ.get('DIST_DIR', cfg.dist_dir)
     if not os.path.isdir(dist_dir):
         print(f'FATAL: dist dir not found: {dist_dir} (run `npm run build` first)')
         raise SystemExit(1)

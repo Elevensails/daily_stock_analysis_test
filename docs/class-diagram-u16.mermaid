@@ -1,0 +1,52 @@
+classDiagram
+    class Config {
+        <<dataclass singleton>>
+        +str stock_list
+        +str litellm_model
+        +List~str~ litellm_fallback_models
+        +str agent_litellm_model
+        +str vision_model
+        +str generation_backend
+        +str report_language
+        ''# model 组（新增）#''
+        +str default_litellm_model
+        +str repair_model
+        +float repair_temperature
+        +str langchain_model_name
+        +str deepseek_base_url
+        ''# holdings 组#''
+        +str default_stock_list
+        ''# thresholds 组（新增）#''
+        +int repair_max_rounds
+        +bool judge_enabled
+        +bool judge_use_llm
+        +float generation_temperature
+        +int max_tokens
+        +int max_output_tokens
+        +bool use_proxy
+        +str proxy_host
+        +int proxy_port
+        +str time_slot_default
+        +str reports_dir
+        +str dist_dir
+        ''# profiles 组（P2 预留）#''
+        +str config_profile
+        +dict profiles
+        ''
+        +get_instance() Config
+        +_load_from_env() Config
+        +validate() List~ConfigIssue~
+    }
+
+    class ConfigHelpers {
+        <<module functions>>
+        +DEFAULT_LITELLM_MODEL : str
+        +DEFAULT_STOCK_LIST : str
+        +load_config_yaml() dict
+        +_yaml_get(cfg, path, default)
+        +apply_proxy_settings(cfg) None
+        +get_config() Config
+    }
+
+    ConfigHelpers ..> Config : builds/reads
+    note for Config "api 组(feishu_*/_api_key/_api_keys) 仅经 env 读取，\n值绝不入库 config.yaml（secret 红线）"

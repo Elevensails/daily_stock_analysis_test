@@ -4,8 +4,12 @@ Accepts TIME_SLOT env var for manual triggers (e.g. TIME_SLOT=0930)."""
 import os, glob, shutil
 from datetime import datetime, timezone, timedelta
 
+# U16：允许直接以脚本方式运行（scripts/ 下）时也能 import src 配置层。
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from src.config import get_config
+
 now = datetime.now(timezone(timedelta(hours=8)))
-tslot = os.environ.get("TIME_SLOT", now.strftime("%H%M"))
+tslot = os.environ.get("TIME_SLOT") or get_config().time_slot_default
 today = now.strftime("%Y%m%d")
 
 print(f"Renaming with tslot={tslot}, date={today}")

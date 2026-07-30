@@ -35,6 +35,10 @@ import sys
 import html
 from datetime import datetime, timezone, timedelta
 
+# U16：允许以脚本方式直接运行（scripts/ 下）时 import src 配置层。
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from src.config import get_config  # noqa: E402
+
 # --------------------------------------------------------------------------- #
 # Configuration
 # --------------------------------------------------------------------------- #
@@ -350,11 +354,12 @@ def main() -> int:
     # Write DeepSeek credentials from the environment into agent/.env.
     os.makedirs(os.path.join(workspace, "agent"), exist_ok=True)
     deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    cfg = get_config()
     env_content = (
         "LANGCHAIN_PROVIDER=deepseek\n"
         f"DEEPSEEK_API_KEY={deepseek_key}\n"
-        "DEEPSEEK_BASE_URL=https://api.deepseek.com\n"
-        "LANGCHAIN_MODEL_NAME=deepseek-chat\n"
+        f"DEEPSEEK_BASE_URL={cfg.deepseek_base_url}\n"
+        f"LANGCHAIN_MODEL_NAME={cfg.langchain_model_name}\n"
     )
     _safe_write(os.path.join(workspace, "agent", ".env"), env_content)
 

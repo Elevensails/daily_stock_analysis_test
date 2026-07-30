@@ -32,6 +32,7 @@ from src.agent.provider_trace import resolved_model_provider_identity
 from src.agent.skills.defaults import CORE_TRADING_SKILL_POLICY_ZH
 from src.config import (
     Config,
+    DEFAULT_LITELLM_MODEL,
     extra_litellm_params,
     get_api_keys_for_model,
     get_config,
@@ -3119,7 +3120,7 @@ class GeminiAnalyzer:
             or generation_config.get('max_tokens')
             or 8192
         )
-        requested_temperature = generation_config.get('temperature', 0.7)
+        requested_temperature = generation_config.get('temperature', config.generation_temperature)
         requested_timeout = generation_config.get("timeout")
 
         models_to_try = [config.litellm_model] + (config.litellm_fallback_models or [])
@@ -3322,8 +3323,8 @@ class GeminiAnalyzer:
     def generate_text(
         self,
         prompt: str,
-        max_tokens: int = 2048,
-        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
     ) -> Optional[str]:
         """Public entry point for free-form text generation.
 
@@ -3339,10 +3340,13 @@ class GeminiAnalyzer:
         Returns:
             Response text, or None if the LLM call fails (error is logged).
         """
+        config = self._get_runtime_config()
+        _max_tokens = max_tokens if max_tokens is not None else config.max_tokens
+        _temperature = temperature if temperature is not None else config.generation_temperature
         try:
             result = self._call_litellm(
                 prompt,
-                generation_config={"max_tokens": max_tokens, "temperature": temperature},
+                generation_config={"max_tokens": _max_tokens, "temperature": _temperature},
             )
             if isinstance(result, tuple):
                 text, model_used, usage = result
@@ -3546,7 +3550,7 @@ class GeminiAnalyzer:
             # 设置生成配置
             generation_config = {
                 "temperature": config.llm_temperature,
-                "max_output_tokens": 8192,
+                "max_output_tokens": config.max_output_tokens,
             }
 
             logger.info(f"[LLM调用] 开始调用 {model_name}...")
@@ -4840,7 +4844,7 @@ def call_rewrite_llm(
         model
         or os.environ.get("REPAIR_MODEL")
         or os.environ.get("LITELLM_MODEL")
-        or "deepseek/deepseek-v4-flash"
+        or DEFAULT_LITELLM_MODEL
     )
     messages = [
         {"role": "system", "content": system_prompt},

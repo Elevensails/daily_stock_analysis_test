@@ -31,6 +31,7 @@ from deploy_pages import md2html, nearest_slot
 # 让 scripts/ 下的脚本能 import src.core.validator（repo root 注入 sys.path）。
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.core.validator import gate_report, JudgeConfig, append_reject_record  # noqa: E402
+from src.config import get_config  # noqa: E402
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
@@ -55,10 +56,11 @@ TYPE_PATTERNS = {
     "vibe": re.compile(r"^vibe_(\d{4})_(\d{8})\.md$"),
 }
 
-# ---- U3 事后校验 gate 配置（环境变量可覆盖，默认开启、不启用 LLM）----
+# ---- U3 事后校验 gate 配置（U16：统一收敛到 config 层，env>yaml>code 三级优先级）----
+_cfg = get_config()
 _JUDGE_CONFIG = JudgeConfig(
-    enabled=os.environ.get("JUDGE_ENABLED", "1") != "0",
-    use_llm=os.environ.get("JUDGE_USE_LLM", "0") == "1",
+    enabled=_cfg.judge_enabled,
+    use_llm=_cfg.judge_use_llm,
 )
 
 
@@ -112,12 +114,15 @@ def _init_slots() -> "dict[str, dict]":
 
 
 def main() -> int:
-    reports_dir = os.environ.get("REPORTS_DIR", os.path.join(_ROOT, "reports"))
-    model = os.environ.get("LITELLM_MODEL", "deepseek/deepseek-v4-flash")
-    # U3 repair loop 配置（环境变量可覆盖，均有默认值）
-    repair_max = min(int(os.environ.get("REPAIR_MAX_ROUNDS", "1")), 3)  # 硬上限 3
-    repair_model = os.environ.get("REPAIR_MODEL") or model
-    repair_temp = float(os.environ.get("REPAIR_TEMPERATURE", "0.1"))
+    cfg = get_config()
+    reports_dir = os.environ.get("REPORTS_DIR") or cfg.reports_dir
+    if not os.path.isabs(reports_dir):
+        reports_dir = os.path.join(_ROOT, reports_dir)
+    model = os.environ.get("LITELLM_MODEL", cfg.default_litellm_model)
+    # U3 repair loop 配置（U16：统一收敛到 config 层，env>yaml>code 三级优先级）
+    repair_max = cfg.repair_max_rounds  # 已是 env>yaml>code 且 clamp 到 [0,3]
+    repair_model = os.environ.get("REPAIR_MODEL") or cfg.repair_model or cfg.default_litellm_model
+    repair_temp = cfg.repair_temperature
     os.makedirs(_FRAG_DIR, exist_ok=True)
 
     # lazy import：repair 核心 + analyzer 重写封装（避免顶层强拉 analyzer 巨型模块）

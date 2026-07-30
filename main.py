@@ -30,20 +30,15 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from dotenv import dotenv_values
-from src.config import setup_env
+from src.config import setup_env, get_config, apply_proxy_settings
 
 _INITIAL_PROCESS_ENV = dict(os.environ)
 setup_env()
 
-# 代理配置 - 通过 USE_PROXY 环境变量控制，默认关闭
-# GitHub Actions 环境自动跳过代理配置
-if os.getenv("GITHUB_ACTIONS") != "true" and os.getenv("USE_PROXY", "false").lower() == "true":
-    # 本地开发环境，启用代理（可在 .env 中配置 PROXY_HOST 和 PROXY_PORT）
-    proxy_host = os.getenv("PROXY_HOST", "127.0.0.1")
-    proxy_port = os.getenv("PROXY_PORT", "10809")
-    proxy_url = f"http://{proxy_host}:{proxy_port}"
-    os.environ["http_proxy"] = proxy_url
-    os.environ["https_proxy"] = proxy_url
+# U16 配置模块化：代理设置统一收敛到 config 层（USE_PROXY 开关 + 国内域名 NO_PROXY 排除）。
+# apply_proxy_settings 内部已处理 GITHUB_ACTIONS 跳过与 use_proxy 开关；
+# get_config() 在 _load_from_env 末尾也会统一调用一次，此处为 import 期的提前生效版本。
+apply_proxy_settings(get_config())
 
 _packaged_import_probe = os.getenv("DSA_PACKAGED_IMPORT_PROBE")
 if _packaged_import_probe:
@@ -70,7 +65,7 @@ import uuid
 from datetime import date, datetime, timezone, timedelta
 
 from src.webui_frontend import prepare_webui_frontend_assets
-from src.config import get_config, Config
+from src.config import Config
 from src.logging_config import setup_logging
 from src.brokers.futu.portfolio import FutuPortfolioError
 from data_provider.base import canonical_stock_code
@@ -159,12 +154,8 @@ def _bootstrap_environment() -> None:
 
     setup_env()
 
-    if os.getenv("GITHUB_ACTIONS") != "true" and os.getenv("USE_PROXY", "false").lower() == "true":
-        proxy_host = os.getenv("PROXY_HOST", "127.0.0.1")
-        proxy_port = os.getenv("PROXY_PORT", "10809")
-        proxy_url = f"http://{proxy_host}:{proxy_port}"
-        os.environ["http_proxy"] = proxy_url
-        os.environ["https_proxy"] = proxy_url
+    # U16 配置模块化：代理设置统一收敛到 config 层（与模块级一致）。
+    apply_proxy_settings(get_config())
 
     _env_bootstrapped = True
 
