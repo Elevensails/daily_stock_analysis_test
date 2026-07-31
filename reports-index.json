@@ -1,6 +1,6 @@
 {
   "schemaVersion": "1.0",
-  "updatedAt": "2026-07-31 14:48",
+  "updatedAt": "2026-07-31 18:03",
   "dates": [
     "20260731",
     "20260730",
@@ -75,7 +75,8 @@
         "report_1200_20260731.html",
         "report_0915_20260731.html",
         "vibe_1430_20260731.html",
-        "market_review_20260731.html"
+        "market_review_20260731.html",
+        "vibe_1800_20260731.html"
       ]
     }
   }
