@@ -9,9 +9,50 @@ on:
         default: ""
 
 jobs:
-  analyze:
+  # =========================================================================
+  # Job 1: 数据获取（仅拉取行情数据到 SQLite，不做 LLM 分析）
+  # 超时设置 15min，独立享受 6h 配额，解决东财网络抖动超时问题
+  # =========================================================================
+  data-fetch:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Compute time slot
+        run: |
+          TSLOT="${{ inputs.time_slot }}"
+          if [ -z "$TSLOT" ]; then
+            TSLOT=$(python3 -c "from datetime import datetime,timezone,timedelta;print(datetime.now(timezone(timedelta(hours=8))).strftime('%H%M'))")
+          fi
+          echo "TSLOT=$TSLOT" >> $GITHUB_ENV
+      - name: Fetch data only (dry-run, no LLM)
+        env:
+          STOCK_LIST: ${{ vars.STOCK_LIST }}
+          GENERATION_BACKEND: litellm
+          LITELLM_MODEL: ${{ vars.DEFAULT_MODEL || 'deepseek/deepseek-v4-flash' }}
+        run: python main.py --no-notify --dry-run --no-market-review
+      - name: Upload fetched data artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fetched-data-${{ github.run_id }}
+          path: data/
+          if-no-files-found: error
+          retention-days: 1
+
+  # =========================================================================
+  # Job 2: 分析 + Judge + Emit + Deploy
+  # 依赖 Job1 的数据 artifact，复刻原 workflow 所有后续步骤
+  # 超时设置 25min，独立享受 6h 配额
+  # =========================================================================
+  analyze-emit:
+    needs: data-fetch
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
     permissions:
       contents: write
       pages: write
@@ -22,6 +63,11 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install -r requirements.txt
+      - name: Download fetched data artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: fetched-data-${{ github.run_id }}
+          path: data/
       - name: Compute time slot
         run: |
           TSLOT="${{ inputs.time_slot }}"

@@ -1,0 +1,111 @@
+classDiagram
+    direction TB
+
+    class RAGContext {
+        +String stock_code
+        +String stock_name
+        +Optional~FinancialBlock~ financial
+        +Optional~TechnicalBlock~ technical
+        +Optional~NewsBlock~ news
+        +Optional~IndustryBlock~ industry
+        +List~SourceTrace~ source_trace
+        +int total_tokens
+    }
+
+    class FinancialBlock {
+        +String source
+        +Optional~float~ pe
+        +Optional~float~ pb
+        +Optional~float~ roe
+        +Optional~float~ revenue_growth
+        +Optional~float~ net_profit
+        +Optional~float~ net_profit_growth
+        +Optional~String~ report_date
+        +Optional~str~ gross_margin
+        +Optional~str~ debt_ratio
+        +Dict~str, Any~ raw
+        +Boolean is_fallback
+    }
+
+    class TechnicalBlock {
+        +String source
+        +Optional~str~ macd_signal
+        +Optional~str~ kdj_signal
+        +Optional~str~ boll_position
+        +Optional~str~ rsi
+        +Optional~str~ volume_signal
+        +Dict~str, Any~ raw
+        +Boolean is_fallback
+    }
+
+    class NewsBlock {
+        +String source
+        +List~NewsItem~ items
+        +int total_count
+        +Boolean is_fallback
+    }
+
+    class NewsItem {
+        +String title
+        +String summary
+        +String date
+        +String source_name
+    }
+
+    class IndustryBlock {
+        +String source
+        +Optional~str~ sector_name
+        +Optional~str~ sector_rank
+        +Optional~float~ sector_change_pct
+        +Optional~str~ peer_comparison
+        +Dict~str, Any~ raw
+        +Boolean is_fallback
+    }
+
+    class SourceTrace {
+        +String dimension
+        +String primary_source
+        +String actual_source
+        +float elapsed_ms
+        +Optional~str~ error
+        +bool success
+    }
+
+    class Retriever {
+        +retrieve_financial_context(code, stock_name, report_kind, config) RAGContext
+    }
+
+    class FinancialRetriever {
+        +retrieve(code, stock_name, config) FinancialBlock
+        -_neodata_financial(code, name) Optional~dict~
+        -_efinance_fallback(code) Optional~dict~
+    }
+
+    class TechnicalRetriever {
+        +retrieve(code, enhanced_context, config) TechnicalBlock
+        -_westock_technical(code) Optional~dict~
+        -_enhanced_context_fallback(enhanced_context) Optional~dict~
+    }
+
+    class NewsRetriever {
+        +retrieve(code, stock_name, search_service, config) NewsBlock
+        -_neodata_news(code, name) Optional~dict~
+        -_search_service_fallback(code, name, svc) Optional~dict~
+    }
+
+    class RAGFormatter {
+        +format_section(rag_context) String
+    }
+
+    RAGContext *-- FinancialBlock
+    RAGContext *-- TechnicalBlock
+    RAGContext *-- NewsBlock
+    RAGContext *-- IndustryBlock
+    RAGContext *-- SourceTrace
+    NewsBlock *-- NewsItem
+
+    Retriever --> FinancialRetriever
+    Retriever --> TechnicalRetriever
+    Retriever --> NewsRetriever
+    Retriever ..> RAGFormatter
+    Retriever ..> RAGContext

@@ -1,0 +1,81 @@
+sequenceDiagram
+    autonumber
+    participant P as Pipeline.analyze_stock()
+    participant R as Retriever.retrieve_financial_context()
+    participant FR as FinancialRetriever
+    participant TR as TechnicalRetriever
+    participant NR as NewsRetriever
+    participant NEO as neodata CLI
+    participant WS as westock
+    participant EF as efinance
+    participant SS as search_service
+    participant FMT as RAGFormatter
+    participant A as Analyzer._format_prompt()
+    participant LLM as LLM API
+
+    Note over P: Step 5 完毕，enhanced_context 已就绪
+    P->>P: config.enable_rag?
+
+    alt RAG 未启用
+        P->>A: analyze(enhanced_context, news_context)
+        Note over P: 现有路径，无变化
+    else RAG 启用
+        P->>R: retrieve_financial_context(code, name, report_kind, config)
+
+        par 并行检索（3 路独立）
+            R->>FR: retrieve(code, name, config)
+            activate FR
+            FR->>NEO: subprocess("python query.py --query 'X 财报 PE PB ROE'", timeout=8s)
+            alt neodata 成功
+                NEO-->>FR: {"PE": 15.3, "PB": 2.1, ...}
+                FR->>FR: 解析 → FinancialBlock(source="neodata")
+            else neodata 超时/失败
+                FR->>EF: efinance.get_stock_info(code)
+                alt efinance 成功
+                    EF-->>FR: 财报数据
+                    FR->>FR: 解析 → FinancialBlock(source="efinance", is_fallback=True)
+                else efinance 也失败
+                    FR-->>R: None（空 block，记录 source_trace）
+                end
+            end
+            deactivate FR
+
+            R->>TR: retrieve(code, enhanced_context, config)
+            activate TR
+            TR->>WS: subprocess("...", timeout=5s)
+            alt westock 成功
+                WS-->>TR: 技术信号数据
+                TR->>TR: 解析 + 去重（MACD金叉/KDJ/BOLL位置等衍生信号）
+                TR-->>R: TechnicalBlock(source="westock")
+            else westock 失败
+                TR->>TR: enhanced_context 提取 MA/BIAS
+                TR-->>R: TechnicalBlock(source="enhanced_context", is_fallback=True)
+            end
+            deactivate TR
+
+            R->>NR: retrieve(code, name, search_service, config)
+            activate NR
+            NR->>NEO: subprocess("python query.py --query 'X 近7日新闻公告'", timeout=8s)
+            alt neodata 成功
+                NEO-->>NR: 新闻列表
+                NR->>NR: 去重（标题前20字）+ 近7日过滤
+                NR-->>R: NewsBlock(source="neodata")
+            else neodata 失败
+                NR->>SS: search_comprehensive_intel(code, name, max_searches=2)
+                SS-->>NR: latest_news + risk_check
+                NR->>NR: 合并去重
+                NR-->>R: NewsBlock(source="search_service", is_fallback=True)
+            end
+            deactivate NR
+        end
+
+        R->>R: 汇总 source_trace
+        R->>FMT: format_section(rag_context)
+        FMT-->>R: prompt 字符串（≤1500 tokens）
+        R-->>P: RAGContext
+
+        P->>A: analyze(enhanced_context, news_context, rag_context=rag_context)
+        A->>A: _format_prompt(..., rag_context=rag_context)
+        Note over A: 在 "## 📊 股票基础信息" 之后 <br/> 插入 "## 🔍 外部数据检索（RAG Grounding）"
+        A->>LLM: 最终 prompt（含 RAG section）
+    end

@@ -1244,6 +1244,13 @@ class Config:
     # --- profiles 组（P2 预留：仅解析不切换）---
     config_profile: str = ""                              # 激活的 profile 名（CONFIG_PROFILE）
     profiles: dict = field(default_factory=dict)          # config.yaml [profiles] 节点
+    # --- U6 RAG（检索增强生成）组 ---
+    # 优先级：env ENABLE_RAG ▶ config.yaml rag.enable ▶ 代码默认 True
+    enable_rag: bool = True                               # RAG 总开关
+    rag_neodata_timeout_seconds: float = 8.0              # neodata 子进程超时（秒）
+    rag_westock_timeout_seconds: float = 5.0              # westock 子进程超时（秒）
+    rag_news_dedup_title_chars: int = 20                  # 新闻去重前缀长度（字符）
+    rag_max_prompt_tokens: int = 1500                     # RAG prompt token 预算（字符近似）
 
     # --- Post-init validation ---------------------------------------------------
     _VALID_AGENT_ARCH = {"single", "multi"}
@@ -2203,6 +2210,27 @@ class Config:
             # profiles 组（P2 预留：仅解析不切换）
             config_profile=os.getenv('CONFIG_PROFILE', '') or '',
             profiles=_yaml_get(yaml_cfg, ['profiles'], {}) or {},
+            # U6 RAG（检索增强生成）组
+            enable_rag=parse_env_bool(
+                os.getenv('ENABLE_RAG'),
+                default=bool(_yaml_get(yaml_cfg, ['rag', 'enable'], True)),
+            ),
+            rag_neodata_timeout_seconds=parse_env_float(
+                os.getenv('RAG_NEODATA_TIMEOUT_SECONDS', _yaml_get(yaml_cfg, ['rag', 'neodata_timeout_seconds'], 8.0)),
+                8.0, field_name='RAG_NEODATA_TIMEOUT_SECONDS', minimum=0.0,
+            ),
+            rag_westock_timeout_seconds=parse_env_float(
+                os.getenv('RAG_WESTOCK_TIMEOUT_SECONDS', _yaml_get(yaml_cfg, ['rag', 'westock_timeout_seconds'], 5.0)),
+                5.0, field_name='RAG_WESTOCK_TIMEOUT_SECONDS', minimum=0.0,
+            ),
+            rag_news_dedup_title_chars=parse_env_int(
+                os.getenv('RAG_NEWS_DEDUP_TITLE_CHARS', _yaml_get(yaml_cfg, ['rag', 'news_dedup_title_chars'], 20)),
+                20, field_name='RAG_NEWS_DEDUP_TITLE_CHARS', minimum=1,
+            ),
+            rag_max_prompt_tokens=parse_env_int(
+                os.getenv('RAG_MAX_PROMPT_TOKENS', _yaml_get(yaml_cfg, ['rag', 'max_prompt_tokens'], 1500)),
+                1500, field_name='RAG_MAX_PROMPT_TOKENS', minimum=1,
+            ),
         )
         apply_proxy_settings(cfg)
         return cfg

@@ -106,6 +106,8 @@ from src.services.daily_market_context import format_daily_market_context_prompt
 from src.services.stock_continuity import format_previous_slot_stock_conclusions_prompt_section
 from src.market_phase_prompt import format_market_phase_prompt_section
 from src.market_structure_prompt import format_market_structure_prompt_section
+from src.rag.context import RAGContext
+from src.rag.formatter import format_rag_section
 
 logger = logging.getLogger(__name__)
 
@@ -3367,6 +3369,7 @@ class GeminiAnalyzer:
         progress_callback: Optional[Callable[[int, str], None]] = None,
         stream_progress_callback: Optional[Callable[[int], None]] = None,
         analysis_context_pack_summary: Optional[str] = None,
+        rag_context: Optional[RAGContext] = None,
     ) -> AnalysisResult:
         """
         分析单只股票
@@ -3380,6 +3383,7 @@ class GeminiAnalyzer:
         Args:
             context: 从 storage.get_analysis_context() 获取的上下文数据
             news_context: 预先搜索的新闻内容（可选）
+            rag_context: RAG 检索上下文（可选，U6 新增）
 
         Returns:
             AnalysisResult 对象
@@ -3505,6 +3509,7 @@ class GeminiAnalyzer:
                 news_context,
                 report_language=report_language,
                 analysis_context_pack_summary=analysis_context_pack_summary,
+                rag_context=rag_context,
             )
             legacy_audit_context = {
                 "language": report_language,
@@ -3691,6 +3696,7 @@ class GeminiAnalyzer:
         news_context: Optional[str] = None,
         report_language: str = "zh",
         analysis_context_pack_summary: Optional[str] = None,
+        rag_context: Optional[RAGContext] = None,
     ) -> str:
         """
         格式化分析提示词（决策仪表盘 v2.0）
@@ -3701,6 +3707,7 @@ class GeminiAnalyzer:
             context: 技术面数据上下文（包含增强数据）
             name: 股票名称（默认值，可能被上下文覆盖）
             news_context: 预先搜索的新闻内容
+            rag_context: RAG 检索上下文（可选，U6 新增）
         """
         code = context.get('code', 'Unknown')
         report_language = normalize_report_language(report_language)
@@ -3778,6 +3785,11 @@ class GeminiAnalyzer:
             prompt += market_structure_section
         if isinstance(analysis_context_pack_summary, str) and analysis_context_pack_summary:
             prompt += analysis_context_pack_summary
+        # U6 RAG 注入：在「基础信息」之后、「技术面数据」之前注入外部检索数据
+        if rag_context is not None and not rag_context.is_empty:
+            rag_section = format_rag_section(rag_context)
+            if rag_section:
+                prompt += f"\n\n{rag_section}"
         prompt += f"""
 
 ## 📈 技术面数据
@@ -4157,7 +4169,8 @@ class GeminiAnalyzer:
 - **具体狙击点位**：买入价、止损价、目标价（精确到分）
 - **检查清单**：每项用 ✅/⚠️/❌ 标记
 - **消息面时间合规**：`latest_news`、`risk_alerts`、`positive_catalysts` 不得包含超出近{news_window_days}日或时间未知的信息
-- **技术面一致性**：严禁把“空头排列”和“多头排列”等互斥结论同时当作有效依据；若基本面/事件面与技术面冲突，必须明确写“事件先行、技术待确认”或“基本面偏多，但技术面尚未确认”
+- **技术面一致性**：严禁把"空头排列"和"多头排列"等互斥结论同时当作有效依据；若基本面/事件面与技术面冲突，必须明确写"事件先行、技术待确认"或"基本面偏多，但技术面尚未确认"
+- **RAG 数据一致性**：所有数字结论须与行情源及 RAG 检索数据一致；RAG section 中的数据不得与你的分析矛盾，不可编造与检索数据不符的数值
  
 请输出完整的 JSON 格式决策仪表盘。"""
 

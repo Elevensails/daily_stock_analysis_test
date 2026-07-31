@@ -102,6 +102,8 @@ from src.core.trading_calendar import (
 )
 from data_provider.us_index_mapping import is_us_stock_code
 from bot.models import BotMessage
+from src.rag.context import RAGContext
+from src.rag.retriever import retrieve_financial_context
 
 
 logger = logging.getLogger(__name__)
@@ -696,6 +698,26 @@ class StockAnalysisPipeline:
             if isinstance(previous_slot_stock_conclusions, dict):
                 enhanced_context["previous_slot_stock_conclusions"] = previous_slot_stock_conclusions
             
+            # Step 5.5: RAG 检索（U6 新增）—— 失败降级，不阻塞主流程
+            rag_context: Optional[RAGContext] = None
+            if getattr(self.config, 'enable_rag', False):
+                try:
+                    self._emit_progress(62, f"{stock_name}：正在 RAG 检索外部数据")
+                    rag_context = retrieve_financial_context(
+                        code=code,
+                        stock_name=stock_name,
+                        report_type=report_type.value,
+                        enhanced_context=enhanced_context,
+                        search_service=self.search_service,
+                        config=self.config,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[RAG] %s(%s) 检索失败（降级，不阻塞）: %s",
+                        stock_name, code, exc,
+                    )
+                    rag_context = None
+
             # Step 7: 调用 AI 分析（传入增强的上下文和新闻）
             (
                 analysis_context_pack_summary,
@@ -746,6 +768,7 @@ class StockAnalysisPipeline:
                     progress_callback=self._emit_progress,
                     stream_progress_callback=_on_llm_stream,
                     analysis_context_pack_summary=analysis_context_pack_summary,
+                    rag_context=rag_context,
                 )
                 llm_duration_ms = int((time.monotonic() - llm_started_at) * 1000)
                 record_llm_run(
@@ -1518,6 +1541,26 @@ class StockAnalysisPipeline:
             )
             if analysis_context_pack_summary:
                 initial_context["analysis_context_pack_summary"] = analysis_context_pack_summary
+
+            # Step 5.5: RAG 检索（U6 新增，Agent 路径）
+            agent_rag_context: Optional[RAGContext] = None
+            if getattr(self.config, 'enable_rag', False):
+                try:
+                    agent_rag_context = retrieve_financial_context(
+                        code=code,
+                        stock_name=stock_name,
+                        report_type=report_type.value,
+                        enhanced_context=None,  # Agent 路径不使用 enhanced_context
+                        search_service=self.search_service,
+                        config=self.config,
+                    )
+                    if agent_rag_context is not None and not agent_rag_context.is_empty:
+                        initial_context["rag_context"] = agent_rag_context
+                except Exception as exc:
+                    logger.warning(
+                        "[RAG] Agent %s(%s) 检索失败（降级，不阻塞）: %s",
+                        stock_name, code, exc,
+                    )
 
             # 运行 Agent
             if report_language in ("en", "ko"):
