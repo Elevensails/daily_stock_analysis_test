@@ -1103,7 +1103,7 @@ class Config:
     log_level: str = "INFO"  # 日志级别
     
     # === 系统配置 ===
-    max_workers: int = 3  # 低并发防封禁
+    max_workers: int = 5  # Job2 仅跑 LLM API 调用（I/O 等待型），数据由 Job1 预取，无网络封禁风险
     debug: bool = False
     http_proxy: Optional[str] = None  # HTTP 代理 (例如: http://127.0.0.1:10809)
     https_proxy: Optional[str] = None # HTTPS 代理
