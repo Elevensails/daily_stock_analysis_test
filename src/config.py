@@ -110,91 +110,6 @@ TICKFLOW_KLINE_ADJUST_VALUES = {"none", "forward", "backward", "forward_additive
 ANSPIRE_LLM_BASE_URL_DEFAULT = "https://open-gateway.anspire.cn/v6"
 ANSPIRE_LLM_MODEL_DEFAULT = "Doubao-Seed-2.0-lite"
 
-# === U16 配置模块化：统一默认值常量 ===
-# 全系统唯一主模型常量（决策#7）。业务代码禁止再硬编码裸串 deepseek/deepseek-v4-flash。
-DEFAULT_LITELLM_MODEL = "deepseek/deepseek-v4-flash"
-# 默认持仓（H1）：4 只标的逗号分隔字符串，仅作兜底默认（替代散落的裸串）。
-DEFAULT_STOCK_LIST = "600036,159915,603823,512400"
-
-# config.yaml 加载结果缓存（避免重复 IO）。
-_CONFIG_YAML_CACHE: Optional[dict] = None
-
-# 国内金融数据源域名：启用代理时排除，避免行情获取失败（_load_from_env 与 apply_proxy_settings 共用）。
-_DOMESTIC_PROXY_EXCLUSION_DOMAINS = [
-    "eastmoney.com",   # 东方财富 (Efinance/Akshare)
-    "sina.com.cn",     # 新浪财经 (Akshare)
-    "163.com",         # 网易财经 (Akshare)
-    "tushare.pro",     # Tushare
-    "baostock.com",    # Baostock
-    "sse.com.cn",      # 上交所
-    "szse.cn",         # 深交所
-    "csindex.com.cn",  # 中证指数
-    "cninfo.com.cn",   # 巨潮资讯
-    "localhost",
-    "127.0.0.1",
-]
-
-
-def load_config_yaml() -> dict:
-    """加载仓库根目录 config.yaml（仅非敏感默认值）。
-
-    失败 / 缺失 / PyYAML 未安装均降级为 ``{}``，不阻断启动。结果按进程缓存。
-    """
-    global _CONFIG_YAML_CACHE
-    if _CONFIG_YAML_CACHE is not None:
-        return _CONFIG_YAML_CACHE
-    path = Path(__file__).resolve().parent.parent / "config.yaml"
-    data: dict = {}
-    try:
-        if path.exists():
-            import yaml  # 懒加载，复用现有范式（config.py:_parse_litellm_yaml）
-            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("config.yaml 解析失败，忽略: %s", exc)
-        data = {}
-    _CONFIG_YAML_CACHE = data
-    return data
-
-
-def _yaml_get(yaml_cfg: dict, path: List[str], default):
-    """按嵌套路径（如 ['model','repair_model']）取值，缺失回退 default。"""
-    cur = yaml_cfg
-    for key in path:
-        if not isinstance(cur, dict) or key not in cur or cur[key] is None:
-            return default
-        cur = cur[key]
-    return cur
-
-
-def _apply_proxy_no_proxy_exclusions(proxy_url: str) -> None:
-    """写入 http(s)_proxy（小写+大写）并设置国内域名 NO_PROXY 排除。"""
-    os.environ["http_proxy"] = proxy_url
-    os.environ["https_proxy"] = proxy_url
-    os.environ["HTTP_PROXY"] = proxy_url
-    os.environ["HTTPS_PROXY"] = proxy_url
-    current_no_proxy = os.getenv("NO_PROXY") or os.getenv("no_proxy") or ""
-    existing_domains = current_no_proxy.split(",") if current_no_proxy else []
-    final_domains = list(set(existing_domains + _DOMESTIC_PROXY_EXCLUSION_DOMAINS))
-    final_no_proxy = ",".join(filter(None, final_domains))
-    os.environ["NO_PROXY"] = final_no_proxy
-    os.environ["no_proxy"] = final_no_proxy
-
-
-def apply_proxy_settings(cfg: 'Config') -> None:
-    """统一设置代理（新增 use_proxy 机制，O5/P1）。
-
-    仅当 ``use_proxy`` 开启时，依据 ``cfg.proxy_host`` / ``cfg.proxy_port`` 写入
-    http(s)_proxy 并设置国内域名 NO_PROXY 排除。CI 环境（GITHUB_ACTIONS=true）与
-    use_proxy=false 时直接跳过。传统的 HTTP_PROXY env 路径由 _load_from_env 内的
-    _apply_proxy_no_proxy_exclusions 处理，二者共用同一排除集合。
-    """
-    if os.getenv("GITHUB_ACTIONS") == "true":
-        return  # CI 永远跳过（与现状一致）
-    if not cfg.use_proxy:
-        return
-    proxy_url = f"http://{cfg.proxy_host}:{cfg.proxy_port}"
-    _apply_proxy_no_proxy_exclusions(proxy_url)
-
 
 def _has_ntfy_topic_endpoint(value: Optional[str]) -> bool:
     """Return whether an ntfy URL points at a concrete topic endpoint."""
@@ -1217,34 +1132,6 @@ class Config:
     # CONFIG_VALIDATE_MODE=strict: exit(1) when any "error" severity issue is found
     config_validate_mode: str = "warn"
 
-    # === U16 配置模块化：新增字段分组（沿用既有 dataclass，不引入 pydantic）===
-    # 优先级：环境变量 ▶ config.yaml ▶ 代码默认（见 docs/system_design_u16.md）。
-    # --- model 组 ---
-    default_litellm_model: str = DEFAULT_LITELLM_MODEL   # 全系统唯一主模型常量（决策#7）
-    repair_model: str = ""                                # 空 → 回退 default_litellm_model
-    repair_temperature: float = 0.1                        # repair loop 温度
-    langchain_model_name: str = "deepseek-chat"           # run_vibe.py 写 agent/.env 用
-    deepseek_base_url: str = "https://api.deepseek.com"   # 同上
-    # --- holdings 组 ---
-    default_stock_list: str = DEFAULT_STOCK_LIST           # 默认持仓（替代散落裸串）
-    # --- thresholds 组 ---
-    repair_max_rounds: int = 2                             # 硬上限 3（字段赋值处 min(_,3)）；U3 修改策略默认 1→2
-    judge_enabled: bool = True                            # U3 事后校验 gate 开关
-    judge_use_llm: bool = False                           # 是否启用真实 LLM judge
-    safe_degrade_enabled: bool = True                     # U3 修改策略：安全降级发布开关（P0-7）
-    generation_temperature: float = 0.7                   # 生成温度（LLM_TEMPERATURE 镜像）
-    max_tokens: int = 2048                                # 生成 max_tokens 默认
-    max_output_tokens: int = 8192                         # 生成 max_output_tokens 默认
-    use_proxy: bool = False                               # 新增 use_proxy 代理开关
-    proxy_host: str = "127.0.0.1"                         # 代理主机
-    proxy_port: int = 10809                               # 代理端口
-    time_slot_default: str = "1800"                      # 默认时段 4 位 HHMM（18:00）
-    reports_dir: str = "reports"                          # 报告目录
-    dist_dir: str = "web/dist"                            # 前端构建产物目录
-    # --- profiles 组（P2 预留：仅解析不切换）---
-    config_profile: str = ""                              # 激活的 profile 名（CONFIG_PROFILE）
-    profiles: dict = field(default_factory=dict)          # config.yaml [profiles] 节点
-
     # --- Post-init validation ---------------------------------------------------
     _VALID_AGENT_ARCH = {"single", "multi"}
     _VALID_ORCHESTRATOR_MODES = {"quick", "standard", "full", "specialist"}
@@ -1328,17 +1215,46 @@ class Config:
         # 确保环境变量已加载
         setup_env()
 
-        # === U16：加载 config.yaml（仅非敏感默认值）===
-        # 三级优先级：env ▶ config.yaml ▶ 代码默认（详见 docs/system_design_u16.md）。
-        yaml_cfg = load_config_yaml()
-
         # === 智能代理配置 (关键修复) ===
-        # 如果配置了代理（HTTP_PROXY / http_proxy），自动设置 NO_PROXY 以排除国内
-        # 数据源，避免行情获取失败。新的 use_proxy 机制见 apply_proxy_settings()
-        # （在 _load_from_env 末尾统一调用），二者共用同一排除集合。
+        # 如果配置了代理，自动设置 NO_PROXY 以排除国内数据源，避免行情获取失败
         http_proxy = os.getenv('HTTP_PROXY') or os.getenv('http_proxy')
         if http_proxy:
-            _apply_proxy_no_proxy_exclusions(http_proxy)
+            # 国内金融数据源域名列表
+            domestic_domains = [
+                'eastmoney.com',   # 东方财富 (Efinance/Akshare)
+                'sina.com.cn',     # 新浪财经 (Akshare)
+                '163.com',         # 网易财经 (Akshare)
+                'tushare.pro',     # Tushare
+                'baostock.com',    # Baostock
+                'sse.com.cn',      # 上交所
+                'szse.cn',         # 深交所
+                'csindex.com.cn',  # 中证指数
+                'cninfo.com.cn',   # 巨潮资讯
+                'localhost',
+                '127.0.0.1'
+            ]
+
+            # 获取现有的 no_proxy
+            current_no_proxy = os.getenv('NO_PROXY') or os.getenv('no_proxy') or ''
+            existing_domains = current_no_proxy.split(',') if current_no_proxy else []
+
+            # 合并去重
+            final_domains = list(set(existing_domains + domestic_domains))
+            final_no_proxy = ','.join(filter(None, final_domains))
+
+            # 设置环境变量 (requests/urllib3/aiohttp 都会遵守此设置)
+            os.environ['NO_PROXY'] = final_no_proxy
+            os.environ['no_proxy'] = final_no_proxy
+
+            # 确保 HTTP_PROXY 也被正确设置（以防仅在 .env 中定义但未导出）
+            os.environ['HTTP_PROXY'] = http_proxy
+            os.environ['http_proxy'] = http_proxy
+
+            # HTTPS_PROXY 同理
+            https_proxy = os.getenv('HTTPS_PROXY') or os.getenv('https_proxy')
+            if https_proxy:
+                os.environ['HTTPS_PROXY'] = https_proxy
+                os.environ['https_proxy'] = https_proxy
 
         
         # 解析自选股列表（逗号分隔，统一为大写 Issue #355）
@@ -1506,7 +1422,7 @@ class Config:
                 elif anthropic_api_keys:
                     litellm_model = f'anthropic/{_anthropic_model_name}'
                 elif deepseek_api_keys:
-                    litellm_model = DEFAULT_LITELLM_MODEL
+                    litellm_model = 'deepseek/deepseek-chat'
                     inferred_legacy_deepseek_model = True
                 elif openai_api_keys:
                     # For openai-compatible models, add prefix only if not already prefixed
@@ -1522,11 +1438,19 @@ class Config:
                     _fb = f'gemini/{_gemini_fallback}' if '/' not in _gemini_fallback else _gemini_fallback
                     litellm_fallback_models = [_fb]
 
+        if (
+            inferred_legacy_deepseek_model
+            and llm_models_source == "legacy_env"
+            and litellm_model == 'deepseek/deepseek-chat'
+        ):
+            logger.warning(
+                "Deprecation warning:\n"
+                "deepseek-chat will be deprecated on 2026-07-24,\n"
+                "please migrate to deepseek-v4-flash."
+            )
+
         generation_backend = (
-            os.getenv(
-                'GENERATION_BACKEND',
-                _yaml_get(yaml_cfg, ['analysis_style', 'generation_backend'], LITELLM_BACKEND_ID),
-            ).strip().lower()
+            os.getenv('GENERATION_BACKEND', LITELLM_BACKEND_ID).strip().lower()
             or LITELLM_BACKEND_ID
         )
         _generation_fallback_raw = os.getenv('GENERATION_FALLBACK_BACKEND')
@@ -1694,7 +1618,7 @@ class Config:
         if report_show_llm_model_raw is not None and not report_show_llm_model_raw.strip():
             report_show_llm_model = False
 
-        cfg = cls(
+        return cls(
             stock_list=stock_list,
             feishu_app_id=os.getenv('FEISHU_APP_ID'),
             feishu_app_secret=os.getenv('FEISHU_APP_SECRET'),
@@ -2177,35 +2101,7 @@ class Config:
                 if os.getenv('ALPHASIFT_INSTALL_SPEC') is None
                 else os.getenv('ALPHASIFT_INSTALL_SPEC', '').strip()
             ),
-            # === U16 配置模块化：新增字段（三级合并 env ▶ yaml ▶ code）===
-            # model 组
-            default_litellm_model=os.getenv('LITELLM_MODEL', _yaml_get(yaml_cfg, ['model', 'default_litellm_model'], DEFAULT_LITELLM_MODEL)) or DEFAULT_LITELLM_MODEL,
-            repair_model=os.getenv('REPAIR_MODEL', _yaml_get(yaml_cfg, ['model', 'repair_model'], '')) or '',
-            repair_temperature=parse_env_float(os.getenv('REPAIR_TEMPERATURE', _yaml_get(yaml_cfg, ['model', 'repair_temperature'], 0.1)), 0.1, field_name='REPAIR_TEMPERATURE', minimum=0.0, maximum=2.0),
-            langchain_model_name=os.getenv('LANGCHAIN_MODEL_NAME', _yaml_get(yaml_cfg, ['model', 'langchain_model_name'], 'deepseek-chat')) or 'deepseek-chat',
-            deepseek_base_url=os.getenv('DEEPSEEK_BASE_URL', _yaml_get(yaml_cfg, ['model', 'deepseek_base_url'], 'https://api.deepseek.com')) or 'https://api.deepseek.com',
-            # holdings 组
-            default_stock_list=os.getenv('STOCK_LIST', _yaml_get(yaml_cfg, ['holdings', 'stock_list'], DEFAULT_STOCK_LIST)) or DEFAULT_STOCK_LIST,
-            # thresholds 组
-            repair_max_rounds=min(parse_env_int(os.getenv('REPAIR_MAX_ROUNDS', _yaml_get(yaml_cfg, ['thresholds', 'repair_max_rounds'], 2)), 2, field_name='REPAIR_MAX_ROUNDS', minimum=0), 3),
-            judge_enabled=parse_env_bool(os.getenv('JUDGE_ENABLED'), default=bool(_yaml_get(yaml_cfg, ['thresholds', 'judge_enabled'], True))),
-            judge_use_llm=parse_env_bool(os.getenv('JUDGE_USE_LLM'), default=bool(_yaml_get(yaml_cfg, ['thresholds', 'judge_use_llm'], False))),
-            safe_degrade_enabled=parse_env_bool(os.getenv('SAFE_DEGRADE_ENABLED'), default=bool(_yaml_get(yaml_cfg, ['thresholds', 'safe_degrade_enabled'], True))),
-            generation_temperature=parse_env_float(os.getenv('LLM_TEMPERATURE', _yaml_get(yaml_cfg, ['thresholds', 'generation_temperature'], 0.7)), 0.7, field_name='LLM_TEMPERATURE', minimum=0.0, maximum=2.0),
-            max_tokens=parse_env_int(_yaml_get(yaml_cfg, ['thresholds', 'max_tokens'], 2048), 2048, field_name='MAX_TOKENS', minimum=1),
-            max_output_tokens=parse_env_int(_yaml_get(yaml_cfg, ['thresholds', 'max_output_tokens'], 8192), 8192, field_name='MAX_OUTPUT_TOKENS', minimum=1),
-            use_proxy=parse_env_bool(os.getenv('USE_PROXY'), default=bool(_yaml_get(yaml_cfg, ['thresholds', 'use_proxy'], False))),
-            proxy_host=os.getenv('PROXY_HOST', _yaml_get(yaml_cfg, ['thresholds', 'proxy_host'], '127.0.0.1')) or '127.0.0.1',
-            proxy_port=parse_env_int(os.getenv('PROXY_PORT', _yaml_get(yaml_cfg, ['thresholds', 'proxy_port'], 10809)), 10809, field_name='PROXY_PORT', minimum=1, maximum=65535),
-            time_slot_default=os.getenv('TIME_SLOT', _yaml_get(yaml_cfg, ['thresholds', 'time_slot_default'], '1800')) or '1800',
-            reports_dir=os.getenv('REPORTS_DIR', _yaml_get(yaml_cfg, ['thresholds', 'reports_dir'], 'reports')) or 'reports',
-            dist_dir=os.getenv('DIST_DIR', _yaml_get(yaml_cfg, ['thresholds', 'dist_dir'], 'web/dist')) or 'web/dist',
-            # profiles 组（P2 预留：仅解析不切换）
-            config_profile=os.getenv('CONFIG_PROFILE', '') or '',
-            profiles=_yaml_get(yaml_cfg, ['profiles'], {}) or {},
         )
-        apply_proxy_settings(cfg)
-        return cfg
     
     @classmethod
     def _parse_litellm_yaml(cls, config_path: str) -> List[Dict[str, Any]]:
@@ -3475,46 +3371,6 @@ class Config:
                     field="VISION_MODEL",
                 ))
 
-        # --- U16 配置模块化：新增字段类型/范围校验 ---
-        if self.repair_max_rounds > 3:
-            issues.append(ConfigIssue(
-                severity="error",
-                message=f"REPAIR_MAX_ROUNDS={self.repair_max_rounds} 超过硬上限 3（已自动 clamp，建议修正配置）。",
-                field="REPAIR_MAX_ROUNDS",
-                code="u16_repair_max_rounds",
-            ))
-        if not (0.0 <= self.repair_temperature <= 2.0):
-            issues.append(ConfigIssue(
-                severity="error",
-                message=f"REPAIR_TEMPERATURE={self.repair_temperature} 超出范围 [0.0, 2.0]。",
-                field="REPAIR_TEMPERATURE",
-                code="u16_repair_temperature",
-            ))
-        if not (0.0 <= self.generation_temperature <= 2.0):
-            issues.append(ConfigIssue(
-                severity="error",
-                message=f"GENERATION_TEMPERATURE(=LLM_TEMPERATURE)={self.generation_temperature} 超出范围 [0.0, 2.0]。",
-                field="LLM_TEMPERATURE",
-                code="u16_generation_temperature",
-            ))
-        if not (1 <= self.proxy_port <= 65535):
-            issues.append(ConfigIssue(
-                severity="error",
-                message=f"PROXY_PORT={self.proxy_port} 超出范围 [1, 65535]。",
-                field="PROXY_PORT",
-                code="u16_proxy_port",
-            ))
-        if not re.fullmatch(r"\d{4}", self.time_slot_default or ""):
-            issues.append(ConfigIssue(
-                severity="error",
-                message=(
-                    f"TIME_SLOT_DEFAULT={self.time_slot_default!r} 必须为 4 位 HHMM"
-                    "（如 '1800' 表示 18:00）。"
-                ),
-                field="TIME_SLOT_DEFAULT",
-                code="u16_time_slot_default",
-            ))
-
         return issues
 
     def validate(self) -> List[str]:
@@ -3588,28 +3444,14 @@ def extra_litellm_params(model: str, config: Config) -> Dict[str, Any]:
 
 
 if __name__ == "__main__":
-    import sys
-
-    config = get_config()
-
-    # U16：支持 `python -m src.config validate` 子命令
-    if len(sys.argv) > 1 and sys.argv[1] == "validate":
-        issues = config.validate_structured()
-        if issues:
-            print("=== 配置校验结果 ===")
-            for issue in issues:
-                print(f"  [{issue.severity}] {issue.message}")
-        else:
-            print("配置校验通过，无问题。")
-        sys.exit(1 if any(issue.severity == "error" for issue in issues) else 0)
-
     # 测试配置加载
+    config = get_config()
     print("=== 配置加载测试 ===")
     print(f"自选股列表: {config.stock_list}")
     print(f"数据库路径: {config.database_path}")
     print(f"最大并发数: {config.max_workers}")
     print(f"调试模式: {config.debug}")
-
+    
     # 验证配置
     warnings = config.validate()
     if warnings:

@@ -35,10 +35,6 @@ import sys
 import html
 from datetime import datetime, timezone, timedelta
 
-# U16：允许以脚本方式直接运行（scripts/ 下）时 import src 配置层。
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from src.config import get_config  # noqa: E402
-
 # --------------------------------------------------------------------------- #
 # Configuration
 # --------------------------------------------------------------------------- #
@@ -299,30 +295,6 @@ def _structure_report(raw_md: str) -> str:
     return "\n".join(out_parts).strip() + "\n"
 
 
-def _clean_reason(raw_reason: str, rc: int, has_key: bool) -> str:
-    """清洗面向用户的错误文案，绝不暴露 traceback / 内部堆栈细节。
-
-    上游 vibe-trading-ai 崩溃时 stderr 首行通常是 ``Traceback (most recent
-    call last):``，直接透传给量化页面既不友好又暴露实现细节，故统一替换为友好
-    提示。判定优先级（最具体的已知失败原因优先）：
-      1. rc == 124（超时）：运行超时提示
-      2. 缺少 DEEPSEEK_API_KEY：沙箱环境常见，run 根本未执行
-      3. 空 / 仅空白：未知错误
-      4. 含 ``traceback``（不区分大小写）：上游分析服务异常提示
-      5. 其他：保留原样并截断到 120 字符，避免单行过长
-    """
-    if rc == 124:
-        return f"运行超时（>{VIBE_TIMEOUT_SECONDS}s）"
-    if not has_key:
-        return "缺少 DEEPSEEK_API_KEY（沙箱环境常见），vibe-trading run 未执行"
-    reason = (raw_reason or "").strip()
-    if not reason:
-        return "未知错误"
-    if "traceback" in reason.lower():
-        return "上游分析服务异常（请检查 API Key / 网络连接 / vibe-trading-ai 依赖版本）"
-    return reason[:120]
-
-
 def _build_error_report(reason: str) -> str:
     """Graceful skeleton when vibe could not run (missing key/network/timeout)."""
     lines = [
@@ -332,7 +304,7 @@ def _build_error_report(reason: str) -> str:
         "",
         f"> ⚠️ 本次 vibe-trading 未能完成分析：{html.escape(reason)}",
         "",
-        "> 以下为按标的预留的结构化骨架，待服务恢复后由下次运行填充：",
+        "以下为按标的预留的结构化骨架，待 API Key / 网络恢复后由下次运行填充：",
         "",
     ]
     for code, name in HOLDINGS:
@@ -354,12 +326,11 @@ def main() -> int:
     # Write DeepSeek credentials from the environment into agent/.env.
     os.makedirs(os.path.join(workspace, "agent"), exist_ok=True)
     deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "")
-    cfg = get_config()
     env_content = (
         "LANGCHAIN_PROVIDER=deepseek\n"
         f"DEEPSEEK_API_KEY={deepseek_key}\n"
-        f"DEEPSEEK_BASE_URL={cfg.deepseek_base_url}\n"
-        f"LANGCHAIN_MODEL_NAME={cfg.langchain_model_name}\n"
+        "DEEPSEEK_BASE_URL=https://api.deepseek.com\n"
+        "LANGCHAIN_MODEL_NAME=deepseek-chat\n"
     )
     _safe_write(os.path.join(workspace, "agent", ".env"), env_content)
 
@@ -402,12 +373,11 @@ def main() -> int:
         return 0
 
     # Graceful failure path: emit a skeleton so deploy_pages.py still has input.
-    # 取 stderr 首行作为原始原因，再经 _clean_reason 清洗为面向用户的友好文案
-    # （上游崩溃时首行往往是 Traceback，必须替换，不可透传给量化页面）。
-    first_line = (
-        (stderr or "").strip().splitlines()[0] if (stderr or "").strip() else ""
-    )
-    reason = _clean_reason(first_line, rc, bool(deepseek_key))
+    reason = (stderr or "未知错误").strip().splitlines()[0][:300]
+    if rc == 124:
+        reason = f"运行超时（>{VIBE_TIMEOUT_SECONDS}s）"
+    elif not deepseek_key:
+        reason = "缺少 DEEPSEEK_API_KEY（沙箱环境常见），vibe-trading run 未执行"
     _safe_write(md_path, _build_error_report(reason))
     print(f"[warn] vibe-trading run 未完成 (rc={rc}); wrote skeleton report.")
     print(f"  reason: {reason}")

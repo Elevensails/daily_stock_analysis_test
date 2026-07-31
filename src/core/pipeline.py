@@ -686,13 +686,8 @@ class StockAnalysisPipeline:
                 enhanced_context["portfolio_context"] = dict(portfolio_context)
             if isinstance(market_structure_context, dict):
                 enhanced_context["market_structure_context"] = market_structure_context
-            # 连续性（需求③ / T01·U1 对齐）：把上一时段个股结论挂入增强上下文，供
-            # analyzer 注入到本时段个股 prompt 的「## 上一时段个股结论」段落。
-            # 该键名 ``previous_slot_stock_conclusions`` 与 Agent 路径完全一致（见
-            # ``_analyze_with_agent`` → ``_build_agent_continuity_section`` 预渲染为
-            # prompt 段 → ``AgentExecutor._build_user_message`` 并入），两条路径共用同一
-            # 渲染函数 ``format_previous_slot_stock_conclusions_prompt_section``，仅值形态
-            # 不同：此处为原始 dict（由 analyzer 渲染），Agent 路径为预渲染字符串。
+            # 连续性（需求③）：把上一时段个股结论挂入增强上下文，供 analyzer 注入到
+            # 本时段个股 prompt 的「## 上一时段个股结论」段落。
             if isinstance(previous_slot_stock_conclusions, dict):
                 enhanced_context["previous_slot_stock_conclusions"] = previous_slot_stock_conclusions
             

@@ -1,21 +1,8 @@
 #!/usr/bin/env python3
-"""Deploy the built frontend (web/dist) to GitHub Pages (U2 方案C).
-
-This script is now a PURE DEPLOYER: it only pushes the static `web/dist/`
-tree produced by the Vite build to the gh-pages branch. All page assembly and
-content rendering live elsewhere (the Vite frontend + emit_frontend_artifacts.py),
-so this file carries no analysis or presentation logic.
-
-Constants `API` / `BRANCH` and the `gh_*` helpers are preserved unchanged —
-`tests/test_deploy_target.py` and `tests/test_xss_escape.py` depend on them.
-"""
-import os, sys, re, base64, json, html, urllib.request, urllib.error, glob
+"""Deploy reports to GitHub Pages. MD->HTML, slot pages, index, archive."""
+import os, re, base64, json, html, urllib.request, urllib.error, glob
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
-
-# 让 `python scripts/deploy_pages.py` 直接运行时也能找到 `src/` 包
-# （CI 容器中脚本目录被加到 sys.path，但 src/ 在 repo 根，必须显式注入）
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 TOKEN = os.environ.get('GITHUB_TOKEN', '')
 # import 守卫：仅作为脚本直接运行时才校验 token，避免 offline 单元测试在
@@ -186,20 +173,6 @@ def md2html(md):
     if in_stock: out.append('</div></div>')
     return '\n'.join(out)
 
-def build_report_html(md, title, now_ts):
-    """把 Markdown 报告内容拼装为完整 HTML 页面（纯函数，无 I/O）。
-
-    仅做 HTML 拼装，不触发 ``gh_get_sha`` / ``gh_put``，便于离线测试。所有来自
-    模型/外部的文本（``title``、md2html 渲染出的 body）均已先 html.escape 再注入；
-    我方生成的标签（<strong>/<td> 等）与常量不 escape。
-    """
-    safe_title = html.escape(title)
-    body = md2html(md)
-    return f'''<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>{safe_title}</title>{BASE_CSS}</head>
-<body><div class="nav"><a href="index.html">&#127968; 首页</a><span class="sep">/</span><a href="archive.html">&#128451; 历史</a><span class="sep">/</span><a href="javascript:history.back()" class="ghost">&#8592; 返回</a></div>
-<div class="wrap"><div class="module">{body}</div>
-<footer>{now_ts} · DeepSeek AI · 以上分析基于公开数据，不构成投资建议</footer></div></body></html>'''
-
 # ====== GITHUB API HELPERS ======
 def _gh_call(url, method, payload=None):
     """Send an authenticated GitHub API call. Returns (status, json_body).
@@ -313,21 +286,14 @@ def ensure_pages_enabled() -> bool:
     served, so the page still 404s. Idempotent: a 200 (already on), 201
     (just enabled) or 409 (concurrent enable) are all treated as success.
     The ``Accept: application/vnd.github+json`` header (set in HEADERS) is
-    required — without it the Pages API returns 403 ("Resource not accessible
-    by integration") even when the token has ``pages: write``.
-
-    This uses the workflow-provided ``GITHUB_TOKEN`` (the ``TOKEN`` global,
-    sourced from the environment). The workflow sets
-    ``permissions: pages: write`` so that token carries the ``pages`` scope;
-    this is preferred over any long-lived PAT, which typically lacks the
-    ``pages`` scope and would 403.
+    required — without it the Pages API returns 403.
 
     Returns ``True`` if Pages is enabled after this call.
     """
     pages_url = _api_url('/pages')
     status, _ = _gh_call(pages_url, 'GET')
     if status == 200:
-        print('  GitHub Pages enabled')
+        print('  GitHub Pages already enabled')
         return True
     if status == 404:
         body = {'source': {'branch': BRANCH, 'path': '/'}, 'build_type': 'legacy'}
@@ -336,20 +302,8 @@ def ensure_pages_enabled() -> bool:
             print('  GitHub Pages enabled (branch=gh-pages)')
             return True
         if p_status == 409:
-            print('  GitHub Pages enabled (concurrent enable)')
+            print('  GitHub Pages already enabled (409)')
             return True
-        if p_status == 403:
-            # The token may still lack pages:write at runtime (e.g. a repo-level
-            # "Workflow permissions" downgrade, or a transient race). Re-check:
-            # if Pages was enabled concurrently or by an external action, treat
-            # it as success rather than failing the whole deploy.
-            re_status, _ = _gh_call(pages_url, 'GET')
-            if re_status == 200:
-                print('  GitHub Pages enabled (verified after 403)')
-                return True
-            print('  WARNING: could not enable Pages (status=403); '
-                  'verify repo "Workflow permissions" grants pages:write')
-            return False
         print(f'  FAILED to enable Pages: status={p_status}')
         return False
     print(f'  skipping Pages enable, unexpected status={status}')
@@ -359,29 +313,28 @@ def ensure_pages_enabled() -> bool:
 def gh_put(path, content_str, sha=None):
     """Create or update a file on the gh-pages branch (first-deploy safe).
 
-    The GitHub Contents API exposes a SINGLE verb for both create and update:
-    ``PUT /repos/{owner}/{repo}/contents/{path}`` (201 created / 200 updated).
-    ``POST`` to that route is NOT supported and returns 404 — which previously
-    meant every first-deploy file write silently failed and the site 404'd.
-
-    We therefore ALWAYS use PUT. We read the current sha via
-    ``GET /contents/{path}?ref=gh-pages`` first; when the file already exists
-    we attach its ``sha`` (update), otherwise we omit it (create). The caller
-    may pass ``sha`` pre-fetched via ``gh_get_sha``; if omitted we fetch it.
+    Before writing we read the current sha via ``GET /contents/{path}?ref=gh-pages``:
+      - 200 (file exists) → ``PUT`` with sha (update, exactly as before)
+      - 404 (file missing) → ``POST`` to create the file (first deploy / new page)
+    The caller may pass ``sha`` pre-fetched via ``gh_get_sha``; if omitted we
+    fetch it ourselves so the create-vs-update decision is always correct.
     """
     b64 = base64.b64encode(content_str.encode('utf-8')).decode('ascii')
     if sha is None:
         sha = gh_get_sha(path)
-    payload = {'message': f'deploy {path}', 'content': b64, 'branch': BRANCH}
     if sha:
-        payload['sha'] = sha
-    # PUT is the only valid verb for create AND update on the Contents API.
-    req = urllib.request.Request(f'{API}/{path}', data=json.dumps(payload).encode('utf-8'), headers=HEADERS, method='PUT')
+        payload = {'message': f'deploy {path}', 'content': b64, 'branch': BRANCH, 'sha': sha}
+        method = 'PUT'
+    else:
+        # Create: POST (branch already exists after ensure_gh_pages_branch).
+        payload = {'message': f'deploy {path}', 'content': b64, 'branch': BRANCH}
+        method = 'POST'
+    req = urllib.request.Request(f'{API}/{path}', data=json.dumps(payload).encode('utf-8'), headers=HEADERS, method=method)
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return resp.status
     except urllib.error.HTTPError as e:
-        print(f'  HTTP {e.code} for {path} (PUT)'); return e.code
+        print(f'  HTTP {e.code} for {path} ({method})'); return e.code
 
 def gh_get_sha(path):
     try:
@@ -401,19 +354,6 @@ def gh_get_content(path):
             return None
         return base64.b64decode(content).decode('utf-8', errors='replace')
     except: return None
-
-def gh_delete(path, sha):
-    """Delete a file on the gh-pages branch (used to clean stale legacy files)."""
-    if not sha:
-        return False
-    req = urllib.request.Request(f'{API}/{path}?ref={BRANCH}', headers=HEADERS, method='DELETE')
-    req.data = json.dumps({'message': f'remove {path}', 'sha': sha, 'branch': BRANCH}).encode('utf-8')
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return resp.status in (200, 204)
-    except urllib.error.HTTPError as e:
-        print(f'  HTTP {e.code} deleting {path} (skipped)')
-        return False
 
 def nearest_slot(tslot):
     slots = ['0900','0930','1200','1430','1800']
@@ -474,141 +414,180 @@ def extract_preview(html_text, max_len=90):
         cut = cut[:sp]
     return cut.rstrip() + '…'
 
-def _walk_dist(dist_dir):
-    """Yield all file paths (repo-relative, '/'-separated) under dist_dir."""
-    out = []
-    for root, _, fnames in os.walk(dist_dir):
-        for fn in fnames:
-            full = os.path.join(root, fn)
-            rel = os.path.relpath(full, dist_dir).replace(os.sep, '/')
-            out.append(rel)
-    return out
+# ====== PAGE GENERATORS ======
+def build_report_html(md, title, now_ts):
+    """把 Markdown 报告内容拼装为完整 HTML 页面（纯函数，无 I/O）。
 
-def _push_tree(dist_dir):
-    """Upload the entire dist tree to gh-pages via gh_put (create/update)."""
-    paths = _walk_dist(dist_dir)
-    for rel in paths:
-        with open(os.path.join(dist_dir, rel), 'r', encoding='utf-8', errors='replace') as f:
-            content = f.read()
-        sha = gh_get_sha(rel)
-        status = gh_put(rel, content, sha)
-        print(f'  {status} {rel}')
-
-def _build_reports_index(manifest):
-    """From today's manifest build {date: {'slots':[...], 'fragments':[...]}}."""
-    entries = {}
-    slots = (manifest or {}).get('slots', {}) or {}
-    for slot_code, slot in slots.items():
-        frags = (slot or {}).get('fragments', {}) or {}
-        files = [v for v in frags.values() if v]
-        if not files:
-            continue
-        date = None
-        for f in files:
-            m = re.search(r'_(\d{8})\.html$', f)
-            if m:
-                date = m.group(1)
-                break
-        if not date:
-            continue
-        e = entries.setdefault(date, {'slots': [], 'fragments': []})
-        if slot_code not in e['slots']:
-            e['slots'].append(slot_code)
-        for f in files:
-            if f not in e['fragments']:
-                e['fragments'].append(f)
-    return entries
-
-def _merge_reports_index(existing, new_entries):
-    """Merge new date→entry map into an existing reports-index.json dict."""
-    entries = dict((existing or {}).get('entries', {}))
-    for date, e in (new_entries or {}).items():
-        cur = entries.get(date, {'slots': [], 'fragments': []})
-        for s in e.get('slots', []):
-            if s not in cur['slots']:
-                cur['slots'].append(s)
-        for f in e.get('fragments', []):
-            if f not in cur['fragments']:
-                cur['fragments'].append(f)
-        entries[date] = cur
-    dates = sorted(entries.keys(), reverse=True)
-    return {
-        'schemaVersion': '1.0',
-        'updatedAt': datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M'),
-        'dates': dates,
-        'entries': entries,
-    }
-
-def _cleanup_stale(dist_dir):
-    """Delete legacy gh-pages files superseded by the new SPA build.
-
-    Only runs when the new SPA entry points are all present (dist is complete),
-    so a partial/failed build can never wipe the live site. Always preserves
-    ``.nojekyll`` and ``reports-index.json``; skips directories.
+    仅做 HTML 拼装，不触发 ``gh_get_sha`` / ``gh_put``，便于离线测试。所有来自
+    模型/外部的文本（``title``、md2html 渲染出的 body）均已先 html.escape 再注入；
+    我方生成的标签（<strong>/<td> 等）与常量不 escape。
     """
-    required = ['index.html', 'report.html', 'market_review.html', 'vibe.html', 'archive.html', 'dashboard.html']
-    if not all(os.path.isfile(os.path.join(dist_dir, r)) for r in required):
-        print('  skip cleanup (dist incomplete)')
-        return
-    dist_paths = set(_walk_dist(dist_dir))
-    keep = {'.nojekyll', 'reports-index.json'}
-    existing = gh_list_files()
-    removed = 0
-    for item in existing:
-        name = item.get('name')
-        if not name or item.get('type') == 'dir':
-            continue
-        if name in keep or name in dist_paths:
-            continue
-        if gh_delete(name, item.get('sha')):
-            removed += 1
-            print(f'  deleted stale: {name}')
-    if removed:
-        print(f'  cleaned {removed} stale file(s)')
+    safe_title = html.escape(title)
+    body = md2html(md)
+    return f'''<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>{safe_title}</title>{BASE_CSS}</head>
+<body><div class="nav"><a href="index.html">&#127968; 首页</a><span class="sep">/</span><a href="archive.html">&#128451; 历史</a><span class="sep">/</span><a href="javascript:history.back()" class="ghost">&#8592; 返回</a></div>
+<div class="wrap"><div class="module">{body}</div>
+<footer>{now_ts} · DeepSeek AI · 以上分析基于公开数据，不构成投资建议</footer></div></body></html>'''
 
-# ====== MAIN (PURE DIST PUSHER) ======
+
+def make_report_page(md_file, html_name, now_ts):
+    with open(md_file, 'r', encoding='utf-8') as f: md = f.read()
+    title = md.split('\n')[0].replace('# ','').strip()
+    html = build_report_html(md, title, now_ts)
+    sha = gh_get_sha(html_name)
+    return gh_put(html_name, html, sha)
+
+def make_slot_page(tslot, time_label, slot_name, color, color_dark, today, reports_dict):
+    now_ts = datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M')
+    slot_data = reports_dict.get(tslot, {})
+    cards = []
+    items = [
+        ('stock','&#128202; 个股分析','4 只持仓逐一深度分析 · 技术面/资金面/操作点位',color),
+        ('market','&#127758; 大盘复盘','指数结构 · 板块主线 · 资金情绪 · 交易计划','#0d9488'),
+        ('vibe','&#128200; 量化分析','Vibe-Trading 多智能体策略回测','#7c3aed'),
+    ]
+    for key, title, desc, border_color in items:
+        if key in slot_data:
+            cards.append(f'<a class="card" style="border-left:4px solid {border_color}" href="{slot_data[key]}"><div class="card-title">{title}</div><div class="card-desc">{desc}</div></a>')
+        else:
+            cards.append(f'<div class="card pending" style="border-left:4px solid {border_color}"><div class="card-title">{title} <span class="badge badge-pending">待生成</span></div><div class="card-desc">{desc}</div></div>')
+    slot_html = f'''<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>{time_label} · A股分析</title>{BASE_CSS}</head>
+<body><div class="nav"><a href="index.html">&#127968; 首页</a><span class="sep">/</span><a href="archive.html">&#128451; 历史</a><span class="sep">/</span><a href="javascript:history.back()" class="ghost">&#8592; 返回</a></div>
+<div class="wrap"><div class="hero" style="background:linear-gradient(135deg,{color_dark},{color})"><h1>&#128338; {time_label} · {slot_name}</h1><div class="meta">今日 · DeepSeek AI · 4 只持仓</div></div>
+{chr(10).join(cards)}
+<footer>以上分析基于公开数据，不构成投资建议</footer></div></body></html>'''
+    sha = gh_get_sha(f'slot_{tslot}.html')
+    return gh_put(f'slot_{tslot}.html', slot_html, sha)
+
+def make_index(reports_dict, today):
+    SLOTS = {
+        '0900':('09:00','早盘分析','#f59e0b','#92400e'),
+        '0930':('09:30','开盘追踪','#ef4444','#991b1b'),
+        '1200':('12:00','午间复盘','#8b5cf6','#5b21b6'),
+        '1430':('14:30','午盘追踪','#3b82f6','#1e40af'),
+        '1800':('18:00','收盘复盘','#10b981','#065f46'),
+    }
+    # Today's slot cards
+    today_cards = []
+    for tslot, (label, name, color, _) in SLOTS.items():
+        sd = reports_dict.get(tslot, {})
+        ok = bool(sd)
+        badge = '<span class="badge badge-ok">已生成</span>' if ok else '<span class="badge badge-pending">待生成</span>'
+        extra = ' pending' if not ok else ''
+        today_cards.append(f'<a class="card{extra}" style="border-left:4px solid {color}" href="slot_{tslot}.html"><div class="card-title">&#128338; {label} · {name} {badge}</div><div class="card-desc">个股分析 + 大盘复盘 + 量化分析</div></a>')
+    generated = sum(1 for t in SLOTS if reports_dict.get(t))
+    index_html = f'''<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>A股智能分析 · 决策仪表盘</title>{BASE_CSS}
+</head><body><div class="wrap">
+<div class="hero"><h1>&#127919; A股智能分析 · 决策仪表盘</h1><div class="meta">DeepSeek AI · 4 只持仓 · 5 时段/天 · <span id="liveTime"></span></div>
+<div class="stats"><span>&#9889; 5次/天</span><span>&#128187; 4 持仓</span><span>&#128196; 3 报告</span><span>&#128176; &asymp;0 月成本</span></div></div>
+<div style="display:flex;gap:8px;margin-bottom:16px">
+<a class="card live" href="dashboard.html" style="flex:1"><div class="card-title">&#9889; 实时盯盘</div><div class="card-desc">30s 刷新 · 4 持仓 + 指数</div></a>
+<a class="card archive" href="archive.html" style="flex:1"><div class="card-title">&#128451; 历史归档</div><div class="card-desc">按日期浏览全部报告</div></a>
+</div>
+<div class="section-title">&#128197; 今日 5 时段分析<span class="count">{generated}/5 已生成</span></div>
+{chr(10).join(today_cards)}
+<footer><a href="https://github.com/Elevensails/daily_stock_analysis">Fork 自 daily_stock_analysis</a> · 09:00 早盘 / 09:30 开盘 / 12:00 午间 / 14:30 午盘 / 18:00 收盘<br>以上分析基于公开数据，不构成投资建议</footer>
+<script>(function(){{var d=new Date();var bj=new Date(d.getTime()+d.getTimezoneOffset()*60000+8*3600000);var ts=bj.toISOString().replace('T',' ').slice(0,16);var el=document.getElementById('liveTime');if(el)el.textContent=ts;}})();</script>
+</div></body></html>'''
+    sha = gh_get_sha('index.html')
+    return gh_put('index.html', index_html, sha)
+
+def make_archive_page():
+    """Generate archive.html listing all dates with reports and previews."""
+    existing = gh_list_files()
+    if not existing: return 404
+    # Group by date: {YYYYMMDD: [report html files]}
+    dates = defaultdict(list)
+    for item in existing:
+        name = item['name']
+        m = re.match(r'(?:report|market_review|vibe)_(\d{4})_(\d{8})\.html', name)
+        if m: dates[m.group(2)].append(name)
+    if not dates: return 404
+    sorted_dates = sorted(dates.keys(), reverse=True)
+    items_html = []
+    for d in sorted_dates:
+        ds = f'{d[:4]}-{d[4:6]}-{d[6:]}'
+        files = dates[d]
+        n = len(files)
+        # Choose a representative report for this date (real file on gh-pages).
+        if f'market_review_1800_{d}.html' in files:
+            rep = f'market_review_1800_{d}.html'
+        else:
+            mr = [f for f in files if 'market_review' in f]
+            rep = mr[0] if mr else files[0]
+        # Safe-degrade: only render preview when content is fetchable.
+        preview_div = ''
+        content = gh_get_content(rep)
+        if content:
+            preview = extract_preview(content)
+            if preview:
+                # Escape to avoid breaking the f-string (e.g. stray { } ).
+                safe = html.escape(preview).replace('{', '&#123;').replace('}', '&#125;')
+                preview_div = f'<div class="preview">{safe}</div>'
+        items_html.append(f'<a class="archive-item" href="{rep}"><div class="date">&#128197; {ds}</div><div class="count">{n} 份报告</div>{preview_div}</a>')
+    archive_html = f'''<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>历史归档 · A股智能分析</title>{BASE_CSS}</head>
+<body><div class="nav"><a href="index.html">&#127968; 首页</a><span class="sep">/</span><span>&#128451; 历史归档</span></div>
+<div class="wrap"><div class="hero"><h1>&#128451; 历史归档</h1><div class="meta">共 {len(sorted_dates)} 个交易日</div></div>
+<div class="archive-list">{chr(10).join(items_html)}</div>
+<footer>以上分析基于公开数据，不构成投资建议</footer></div></body></html>'''
+    sha = gh_get_sha('archive.html')
+    return gh_put('archive.html', archive_html, sha)
+
+# ====== MAIN ======
 def main():
-    from src.config import get_config
-    cfg = get_config()
-    dist_dir = os.environ.get('DIST_DIR', cfg.dist_dir)
-    if not os.path.isdir(dist_dir):
-        print(f'FATAL: dist dir not found: {dist_dir} (run `npm run build` first)')
-        raise SystemExit(1)
+    reports_dir = os.environ.get('REPORTS_DIR', 'reports')
+    now = datetime.now(timezone(timedelta(hours=8)))
+    today = now.strftime('%Y%m%d')
+    now_ts = now.strftime('%Y-%m-%d %H:%M')
+    md_files = sorted(glob.glob(os.path.join(reports_dir, '*.md')))
+    print(f'Found {len(md_files)} MD files')
     if not ensure_gh_pages_branch():  # first-deploy bootstrap / fallback
         print('FATAL: could not ensure gh-pages branch exists')
         raise SystemExit(1)
-    print(f'Pushing {dist_dir} → gh-pages ...')
-    _push_tree(dist_dir)
-
-    # Maintain reports-index.json (archive page fetches it at runtime).
-    manifest_path = os.path.join('web', 'src', 'content', 'manifest.json')
-    existing_idx = {}
-    existing_raw = gh_get_content('reports-index.json')
-    if existing_raw:
-        try:
-            existing_idx = json.loads(existing_raw)
-        except Exception:
-            existing_idx = {}
-    if os.path.isfile(manifest_path):
-        try:
-            with open(manifest_path, 'r', encoding='utf-8') as f:
-                manifest = json.load(f)
-            new_entries = _build_reports_index(manifest)
-            if new_entries:
-                idx = _merge_reports_index(existing_idx, new_entries)
-                gh_put('reports-index.json', json.dumps(idx, ensure_ascii=False, indent=2))
-                print('  updated reports-index.json')
-        except Exception as exc:
-            print(f'  WARN: could not build reports-index.json: {exc}')
-    elif not existing_raw:
-        # Self-heal: create an empty index so the archive page never 404s.
-        idx = {'schemaVersion': '1.0', 'updatedAt': '', 'dates': [], 'entries': {}}
-        gh_put('reports-index.json', json.dumps(idx, ensure_ascii=False, indent=2))
-        print('  created empty reports-index.json')
-
-    # Clean stale legacy files (slot_*.html / old report_*.html / debug.json ...).
-    _cleanup_stale(dist_dir)
-
+    reports_dict = {}
+    for f in md_files:
+        bn = os.path.basename(f)
+        m = re.match(r'report_(\d{4})_(\d{8})\.md', bn)
+        mr = re.match(r'market_review_(\d{4})_(\d{8})\.md', bn)
+        vb = re.match(r'vibe_(\d{4})_(\d{8})\.md', bn)
+        if m:
+            tslot = nearest_slot(m.group(1))
+            hn = bn.replace('.md','.html')
+            reports_dict.setdefault(tslot,{})['stock']=hn
+            print(f'  {make_report_page(f,hn,now_ts)} {hn}')
+        elif mr:
+            tslot = nearest_slot(mr.group(1))
+            hn = bn.replace('.md','.html')
+            reports_dict.setdefault(tslot,{})['market']=hn
+            print(f'  {make_report_page(f,hn,now_ts)} {hn}')
+        elif vb:
+            tslot = nearest_slot(vb.group(1))
+            hn = bn.replace('.md','.html')
+            reports_dict.setdefault(tslot,{})['vibe']=hn
+            print(f'  {make_report_page(f,hn,now_ts)} {hn}')
+        else:
+            print(f'  skip: {bn}')
+    # Merge existing reports from gh-pages
+    existing = gh_list_files()
+    if existing:
+        for item in existing:
+            name = item['name']
+            for pat, key in [(r'report_(\d{4})_(\d{8})\.html','stock'),(r'market_review_(\d{4})_(\d{8})\.html','market'),(r'vibe_(\d{4})_(\d{8})\.html','vibe')]:
+                m = re.match(pat, name)
+                if m and key not in reports_dict.get(m.group(1),{}):
+                    reports_dict.setdefault(m.group(1),{})[key]=name
+                    print(f'  (gh-pages) {name}')
+    # Generate pages
+    SLOTS = {'0900':('09:00','早盘分析','#f59e0b','#92400e'),'0930':('09:30','开盘追踪','#ef4444','#991b1b'),
+             '1200':('12:00','午间复盘','#8b5cf6','#5b21b6'),'1430':('14:30','午盘追踪','#3b82f6','#1e40af'),
+             '1800':('18:00','收盘复盘','#10b981','#065f46')}
+    for ts,(tl,sn,c,cd) in SLOTS.items():
+        print(f'  {make_slot_page(ts,tl,sn,c,cd,today,reports_dict)} slot_{ts}.html')
+    print(f'  {make_index(reports_dict,today)} index.html')
+    print(f'  {make_archive_page()} archive.html')
+    # Debug
+    dbg={'md_files':len(md_files),'slots':list(reports_dict.keys())}
+    gh_put('debug.json', json.dumps(dbg,indent=2))
     if not ensure_pages_enabled():  # first-deploy bootstrap: turn on GitHub Pages
         print('FATAL: could not enable GitHub Pages')
         raise SystemExit(1)

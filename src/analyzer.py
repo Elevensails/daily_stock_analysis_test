@@ -13,7 +13,6 @@ A股自选股智能分析系统 - AI分析层
 import json
 import logging
 import math
-import os
 import re
 import time
 from dataclasses import dataclass
@@ -32,7 +31,6 @@ from src.agent.provider_trace import resolved_model_provider_identity
 from src.agent.skills.defaults import CORE_TRADING_SKILL_POLICY_ZH
 from src.config import (
     Config,
-    DEFAULT_LITELLM_MODEL,
     extra_litellm_params,
     get_api_keys_for_model,
     get_config,
@@ -3120,7 +3118,7 @@ class GeminiAnalyzer:
             or generation_config.get('max_tokens')
             or 8192
         )
-        requested_temperature = generation_config.get('temperature', config.generation_temperature)
+        requested_temperature = generation_config.get('temperature', 0.7)
         requested_timeout = generation_config.get("timeout")
 
         models_to_try = [config.litellm_model] + (config.litellm_fallback_models or [])
@@ -3323,8 +3321,8 @@ class GeminiAnalyzer:
     def generate_text(
         self,
         prompt: str,
-        max_tokens: Optional[int] = None,
-        temperature: Optional[float] = None,
+        max_tokens: int = 2048,
+        temperature: float = 0.7,
     ) -> Optional[str]:
         """Public entry point for free-form text generation.
 
@@ -3340,13 +3338,10 @@ class GeminiAnalyzer:
         Returns:
             Response text, or None if the LLM call fails (error is logged).
         """
-        config = self._get_runtime_config()
-        _max_tokens = max_tokens if max_tokens is not None else config.max_tokens
-        _temperature = temperature if temperature is not None else config.generation_temperature
         try:
             result = self._call_litellm(
                 prompt,
-                generation_config={"max_tokens": _max_tokens, "temperature": _temperature},
+                generation_config={"max_tokens": max_tokens, "temperature": temperature},
             )
             if isinstance(result, tuple):
                 text, model_used, usage = result
@@ -3550,7 +3545,7 @@ class GeminiAnalyzer:
             # 设置生成配置
             generation_config = {
                 "temperature": config.llm_temperature,
-                "max_output_tokens": config.max_output_tokens,
+                "max_output_tokens": 8192,
             }
 
             logger.info(f"[LLM调用] 开始调用 {model_name}...")
@@ -4816,72 +4811,3 @@ if __name__ == "__main__":
         print(f"分析结果: {result.to_dict()}")
     else:
         print("Gemini API 未配置，跳过测试")
-
-
-def call_rewrite_llm(
-    system_prompt: str,
-    user_prompt: str,
-    *,
-    model: "str | None" = None,
-    temperature: float = 0.1,
-    segments: "list | None" = None,
-) -> str:
-    """模块级薄封装：``litellm.completion``（复用 analyzer 已配置的 litellm 与 env 密钥）。
-
-    等价于 ``GeminiAnalyzer._dispatch_litellm_completion`` 末尾的
-    ``litellm.completion(**effective_kwargs)``，但**不依赖 analyzer 实例 / Router**，
-    避免 repair loop 在 emit 阶段强拉整个 analyzer 运行时。
-
-    模型默认取自环境变量 ``REPAIR_MODEL``，缺失则回退 ``LITELLM_MODEL``，
-    再回退 ``deepseek/deepseek-v4-flash``。API key 由 litellm 依据 model 自动从
-    对应环境变量（如 ``DEEPSEEK_API_KEY``）解析，沿用项目既有 env 配置。
-
-    P1-1（grounding 改造点，预留）：后续应在 analyzer 报告生成 prompt 强制
-    「所有数字须来自注入的行情 context，禁止编造；涨跌停/价位结论须与 source_facts
-    一致」。因 analyzer 报告生成入口分散且改动风险高，本轮先落地 call_rewrite_llm，
-    grounding 文案在 ``src/core/prompts_repair.py`` 已统一定义，供后续接入复用。
-    """
-    effective_model = (
-        model
-        or os.environ.get("REPAIR_MODEL")
-        or os.environ.get("LITELLM_MODEL")
-        or DEFAULT_LITELLM_MODEL
-    )
-    # P2-1 预留：segments（结构化违规段指针）。本期仅在 user prompt 尾部附加
-    # 段指针提示，不做段级 patch 合并；后续 P2-1 可基于 segments 做差量改写。
-    effective_user_prompt = user_prompt
-    if segments:
-        pointer_lines: list = []
-        for seg in segments:
-            try:
-                if hasattr(seg, "to_dict"):
-                    seg = seg.to_dict()
-                loc = seg.get("location", {}) if isinstance(seg, dict) else {}
-                idx = loc.get("paragraph_index")
-                reason = seg.get("reason", "") if isinstance(seg, dict) else ""
-                if idx is not None:
-                    pointer_lines.append(f"- 第{idx}段：{reason}")
-            except Exception:
-                continue
-        if pointer_lines:
-            effective_user_prompt = (
-                user_prompt
-                + "\n\n【违规段指针（仅改以下段落，其余逐字保留）】\n"
-                + "\n".join(pointer_lines)
-            )
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": effective_user_prompt},
-    ]
-    resp = litellm.completion(
-        model=effective_model,
-        messages=messages,
-        temperature=temperature,
-    )
-    content = resp.choices[0].message.content
-    return content if isinstance(content, str) else ""
-
-
-# P1-1 TODO: 在 analyzer 报告生成 prompt 追加 grounding 约束段（见 call_rewrite_llm 文档）。
-#   文案锚点：src/core/prompts_repair.py::REPAIR_SYSTEM（「所有数字须来自行情 context、
-#   禁止编造、涨跌停/价位须与 source_facts 一致」），待确认报告生成入口后接入。
