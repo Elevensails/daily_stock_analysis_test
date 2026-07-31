@@ -81,7 +81,7 @@ jobs:
           STOCK_LIST: ${{ vars.STOCK_LIST }}
           GENERATION_BACKEND: litellm   # 与仓库 config.yaml[analysis_style.generation_backend] 对齐
           LITELLM_MODEL: ${{ vars.DEFAULT_MODEL || 'deepseek/deepseek-v4-flash' }}
-        run: python main.py --no-notify
+        run: python main.py --no-notify --force-run
       - name: Rename reports
         env:
           TIME_SLOT: ${{ inputs.time_slot }}
