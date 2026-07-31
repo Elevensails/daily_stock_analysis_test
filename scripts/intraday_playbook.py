@@ -13,6 +13,10 @@
 import os, sys, json, argparse, urllib.request, urllib.parse, urllib.error, base64
 from datetime import datetime, timezone, timedelta
 
+# U16：允许直接以脚本方式运行（scripts/ 下）时也能 import src 配置层。
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from src.config import get_config
+
 # ── 配置 ──────────────────────────────────────────────
 BEIJING_TZ = timezone(timedelta(hours=8))
 OWNER = 'Elevensails'
@@ -298,7 +302,7 @@ def main():
     ap.add_argument('--time', default='09:45', help='时段 09:45/10:30/13:30/14:30/14:55')
     args = ap.parse_args()
 
-    stock_list = os.environ.get('STOCK_LIST', '600036,159915,603823,512400')
+    stock_list = os.environ.get('STOCK_LIST') or get_config().default_stock_list
     stock_codes = [c.strip() for c in stock_list.split(',') if c.strip()]
     print('持仓: {}'.format(stock_codes))
 
@@ -353,8 +357,7 @@ def generate_index_with_intraday(seg_time, intraday_file, now):
     parts.append('<a class="card quant" href="quant.html"><div class="t">&#128200; 量化分析 · Vibe-Trading</div><div class="d">多智能体辩论 · 策略回测</div></a>')
     parts.append('<footer>Fork 自 ZhuLinsen/daily_stock_analysis (49K stars) · 月成本&asymp;0<br>以上分析基于公开数据，不构成投资建议</footer>')
     parts.append('</div></body></html>')
-    return '
-'.join(parts)
+    return '\n'.join(parts)
 
 if __name__ == '__main__':
     main()

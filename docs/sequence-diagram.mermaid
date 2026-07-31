@@ -1,0 +1,40 @@
+sequenceDiagram
+    autonumber
+    participant E as emit_frontend_artifacts
+    participant G as gate_report(log=False)
+    participant R as repair_report (repair.py)
+    participant L as call_rewrite_llm (analyzer)
+    participant M as litellm.completion
+    participant V as validate (re-gate)
+    participant J as jsonl 日志
+
+    E->>G: gate_report(md, source_facts, config, log=False)
+    alt 首轮 passed
+        G-->>E: ValidationResult(passed=True)
+        E->>E: emit(md)  // 不走 repair，repair_rounds=0
+    else 首轮 fail
+        G-->>E: ValidationResult(passed=False, reasons)
+        E->>R: repair_report(md, reasons, source_facts, max_rounds, llm_call, config, llm_judge)
+        loop 每轮 i = 1..max_rounds
+            R->>L: call_rewrite_llm(system, user, model, temp=0.1)
+            L->>M: litellm.completion(...)
+            M-->>L: rewritten_text
+            L-->>R: rewritten_text
+            R->>V: validate(rewritten_text, source_facts, config, llm_judge)
+            alt 通过
+                V-->>R: passed=True
+                R-->>E: RepairResult(passed=True, final_text, rounds, final_action="emit")
+                E->>E: 保存 logs/repaired/<bn>.md
+                E->>E: emit(final_text)
+                E->>J: append_reject_record(final_action="emit", repair_rounds, rewritten, repair_reasons)
+            else 仍 fail
+                V-->>R: passed=False  // 继续下一轮
+            end
+        end
+        alt 轮数耗尽仍 fail（或 llm_call 抛错）
+            R-->>E: RepairResult(passed=False, final_action="reject")
+            E->>J: append_reject_record(final_action="reject", repair_rounds, rewritten, repair_reasons)
+            Note over E: 回退 reject（现有行为），不 emit
+        end
+    end
+    Note over R: 任何 llm_call 抛错 -> try/except -> 立即返回 reject（AC5 安全降级）

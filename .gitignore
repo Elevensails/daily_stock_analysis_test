@@ -88,3 +88,10 @@ static/
 /apps/dsa-desktop/dist/
 /apps/dsa-desktop/node_modules/
 docs/specs/
+
+# U2 方案C 前端（构建产物/依赖/生成的内容契约，不提交）
+web/node_modules/
+web/dist/
+web/src/content/
+# Vite 构建期产生的临时配置缓存（vite.config.ts.timestamp-*.mjs）
+web/vite.config.*.mjs

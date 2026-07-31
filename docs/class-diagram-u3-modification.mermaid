@@ -1,0 +1,98 @@
+classDiagram
+    class ViolationSegment {
+        +str check
+        +str severity
+        +str reason
+        +str quote
+        +str granularity
+        +int paragraph_index
+        +int line_start
+        +int line_end
+        +to_dict() dict
+    }
+    class ValidationResult {
+        +bool passed
+        +float score
+        +list~str~ reasons
+        +list~CheckResult~ checks
+        +list~ViolationSegment~ violation_segments
+        +to_dict() dict
+    }
+    class CheckResult {
+        +str name
+        +bool passed
+        +str detail
+        +str severity
+    }
+    class Paragraph {
+        +int index
+        +int line_start
+        +int line_end
+        +str text
+    }
+    class RepairResult {
+        +bool passed
+        +str final_text
+        +int rounds
+        +bool rewritten
+        +str final_action
+        +list repair_reasons
+        +list last_reasons
+        +list~dict~ degraded_segments
+    }
+    class DegradeResult {
+        +bool ok
+        +str degraded_text
+        +list~dict~ removed_segments
+        +float removed_ratio
+        +str fallback_reason
+    }
+    class validator_module {
+        +split_paragraphs(text) list~Paragraph~
+        +locate_violations(text, checks) list~ViolationSegment~
+        +validate(text, ...) ValidationResult
+        +gate_report(text, ...) ValidationResult
+        +append_reject_record(path, kind, result, ctx, **extra)
+    }
+    class repair_module {
+        +FINAL_EMIT: str
+        +FINAL_EMIT_DEGRADED: str
+        +FINAL_REJECT: str
+        +repair_report(text, ..., safe_degrade_enabled) RepairResult
+        -_build_rewrite_prompt(text, reasons, segments, facts, kind) tuple
+        -_call_llm_compat(llm_call, system, user, model, temperature) str
+    }
+    class degrade_module {
+        +DEGRADED_PLACEHOLDER: str
+        +assemble_degraded(text, segments, ...) DegradeResult
+    }
+    class analyzer_module {
+        +call_rewrite_llm(system, user, model, temperature, segments) str
+    }
+    class emit_script {
+        +main() int
+        -_save_degraded(bn, text)
+        -_inject_degraded_banner(frag_html) str
+        -_render_placeholders(frag_html) str
+        -_assign_fragment_meta(slots, targets, type, meta)
+    }
+    class Config {
+        +bool safe_degrade_enabled
+        +int repair_max_rounds
+        +float repair_temperature
+        +str repair_model
+    }
+
+    ValidationResult *-- CheckResult
+    ValidationResult *-- ViolationSegment
+    validator_module ..> Paragraph : 内部切分
+    validator_module --> ValidationResult : 产出
+    repair_module ..> validator_module : validate() 完整复检
+    repair_module ..> degrade_module : 超限时 assemble_degraded()
+    repair_module --> RepairResult : 产出
+    degrade_module ..> validator_module : 降级稿复检
+    degrade_module --> DegradeResult : 产出
+    emit_script ..> validator_module : gate_report(log=False)
+    emit_script ..> repair_module : repair_report()
+    emit_script ..> analyzer_module : llm_call 注入
+    emit_script ..> Config : 读取开关/轮数/温度

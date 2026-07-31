@@ -20,15 +20,17 @@ A股自选股智能分析系统 - 环境验证测试
 
 """
 import os
-# Proxy config - controlled by USE_PROXY env var, off by default.
-# Set USE_PROXY=true in .env if you need a local proxy (e.g. mainland China).
-# GitHub Actions always skips this regardless of USE_PROXY.
-if os.getenv("GITHUB_ACTIONS") != "true" and os.getenv("USE_PROXY", "false").lower() == "true":
-    proxy_host = os.getenv("PROXY_HOST", "127.0.0.1")
-    proxy_port = os.getenv("PROXY_PORT", "10809")
-    proxy_url = f"http://{proxy_host}:{proxy_port}"
-    os.environ["http_proxy"] = proxy_url
-    os.environ["https_proxy"] = proxy_url
+import sys
+from pathlib import Path
+
+# U16 配置模块化：代理设置统一收敛到 config 层（USE_PROXY 开关 + 国内域名 NO_PROXY 排除）。
+# GitHub Actions 环境自动跳过；本地 USE_PROXY=true 时按 cfg.proxy_host/proxy_port 写入代理。
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from src.config import get_config, apply_proxy_settings
+apply_proxy_settings(get_config())
 
 import argparse
 import logging
@@ -37,9 +39,7 @@ from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import Optional
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+# sys.path 已在文件顶部（代理设置前）注入 REPO_ROOT，此处无需重复。
 
 
 def _reconfigure_output_stream(stream):

@@ -1,0 +1,56 @@
+sequenceDiagram
+    participant E as emit_frontend_artifacts.py
+    participant V as validator.py
+    participant R as repair.py
+    participant A as analyzer.call_rewrite_llm
+    participant D as degrade.py
+    participant L as logs/judge_rejects.jsonl
+    participant W as web 前端
+
+    E->>V: gate_report(md, log=False)
+    V->>V: validate() 判定 fail
+    V->>V: locate_violations() 段落级定位
+    V-->>E: ValidationResult{passed=False, reasons, violation_segments}
+
+    E->>R: repair_report(md, reasons, violation_segments,<br/>max_rounds=cfg.repair_max_rounds,<br/>temperature=cfg.repair_temperature,<br/>safe_degrade_enabled=cfg.safe_degrade_enabled,<br/>llm_call=call_rewrite_llm)
+
+    loop 第 i 轮 (i ≤ max_rounds, clamp 3)
+        R->>R: _build_rewrite_prompt(current,<br/>最新 reasons + 最新 violation_segments)
+        R->>A: _call_llm_compat(system, user, model, temperature)
+        A-->>R: 定向修订后的完整 markdown
+        R->>V: validate(rewritten) 完整复检（不绕过）
+        alt 复检通过
+            V-->>R: passed=True
+            R-->>E: RepairResult{final_action="emit"}
+        else 仍 fail
+            V-->>R: 最新 reasons + violation_segments → 下一轮
+        end
+    end
+
+    Note over R: 轮数耗尽仍 fail
+    alt safe_degrade_enabled = True
+        R->>D: assemble_degraded(current, latest_segments)
+        D->>D: 剥离标红段 → 插入占位标记<br/>护栏: 剥离比≤50% 且段可定位
+        D->>V: validate(degraded_text) 复检
+        alt 复检通过
+            D-->>R: DegradeResult{ok=True}
+            R-->>E: RepairResult{final_action="emit_degraded",<br/>degraded_segments, rounds}
+        else 复检仍 fail / 护栏触发
+            D-->>R: DegradeResult{ok=False}
+            R-->>E: RepairResult{final_action="reject"}
+        end
+    else 开关关闭
+        R-->>E: RepairResult{final_action="reject"}
+    end
+
+    alt final_action = emit_degraded
+        E->>E: _save_degraded() → logs/degraded/<bn>.md
+        E->>E: md2html → _inject_degraded_banner() + _render_placeholders()
+        E->>E: _assign_fragment()（既有逻辑不动）+ _assign_fragment_meta(degraded=true)
+        E->>L: append_reject_record(final_action="emit_degraded",<br/>repair_rounds, degraded_segments, last_reasons)
+        E->>W: manifest.json(含 fragmentMeta) + fragment HTML
+        W->>W: 正文页 banner 直出；列表/归档 fragmentMeta → 「已降级」角标
+    else final_action = reject
+        E->>L: append_reject_record(final_action="reject", ...)
+        Note over E,W: 不发布（现行为）
+    end
