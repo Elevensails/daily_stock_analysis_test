@@ -36,6 +36,7 @@ _U16_ENV_VARS = (
     "LITELLM_MODEL", "REPAIR_MODEL", "REPAIR_TEMPERATURE",
     "LANGCHAIN_MODEL_NAME", "DEEPSEEK_BASE_URL", "STOCK_LIST",
     "REPAIR_MAX_ROUNDS", "JUDGE_ENABLED", "JUDGE_USE_LLM",
+    "SAFE_DEGRADE_ENABLED",
     "LLM_TEMPERATURE", "MAX_TOKENS", "MAX_OUTPUT_TOKENS",
     "USE_PROXY", "PROXY_HOST", "PROXY_PORT", "TIME_SLOT",
     "REPORTS_DIR", "DIST_DIR", "CONFIG_PROFILE",
@@ -85,8 +86,9 @@ def test_code_default_when_no_yaml_no_env(monkeypatch):
     monkeypatch.setattr(cfg_mod, "load_config_yaml", lambda: {})
     c = _rebuild()
     assert c.generation_temperature == 0.7
-    assert c.repair_max_rounds == 1
+    assert c.repair_max_rounds == 2  # U3 修改策略：代码默认 1→2
     assert c.max_output_tokens == 8192
+    assert c.safe_degrade_enabled is True  # U3 修改策略：安全降级开关默认开
 
 
 def test_yaml_tier_merges_when_no_env(monkeypatch):
@@ -127,9 +129,10 @@ def test_new_field_defaults_match_contract():
     assert c.langchain_model_name == "deepseek-chat"
     assert c.deepseek_base_url == "https://api.deepseek.com"
     assert c.default_stock_list == "600036,159915,603823,512400"
-    assert c.repair_max_rounds == 1
+    assert c.repair_max_rounds == 2  # U3 修改策略：代码默认 1→2（与 config.yaml 同步）
     assert c.judge_enabled is True
     assert c.judge_use_llm is False
+    assert c.safe_degrade_enabled is True  # U3 修改策略新增开关
     assert c.generation_temperature == 0.7
     assert c.max_tokens == 2048
     assert c.max_output_tokens == 8192

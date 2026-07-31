@@ -12,18 +12,28 @@ function dateLabel(d: string): string {
   return `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}`;
 }
 
-function slotGroup(date: string, label: string, frags: Record<string, string | null>): HTMLElement {
+function slotGroup(
+  date: string,
+  label: string,
+  frags: Record<string, string | null>,
+  meta?: Record<string, { degraded?: boolean } | null>
+): HTMLElement {
   const links = el('div', { class: 'slot-group__links' });
   let any = false;
   for (const t of ['report', 'market_review', 'vibe']) {
     const file = frags[t];
     if (file) {
       any = true;
-      links.append(
-        el('a', { class: 'chip chip--ok', href: `${TYPE_HREF[t]}#${file.replace(/\.html$/, '')}` }, [
-          TYPE_LABELS[t],
-        ])
+      const chip = el(
+        'a',
+        { class: 'chip chip--ok', href: `${TYPE_HREF[t]}#${file.replace(/\.html$/, '')}` },
+        [TYPE_LABELS[t]]
       );
+      // U3 加法字段：降级片段附「已降级」角标（optional chaining，历史数据无感）
+      if (meta?.[t]?.degraded) {
+        chip.append(el('span', { class: 'dsa-degraded-badge', text: '已降级' }));
+      }
+      links.append(chip);
     }
   }
   if (!any) links.append(el('span', { class: 'chip chip--pending' }, ['全部待生成']));
@@ -58,7 +68,7 @@ export async function renderArchive(root: HTMLElement): Promise<void> {
     ]);
     const slotsWrap = el('div', { class: 'archive-date__slots' });
     for (const s of entry.slots) {
-      slotsWrap.append(slotGroup(date, s.label, s.fragments));
+      slotsWrap.append(slotGroup(date, s.label, s.fragments, s.fragmentMeta));
     }
     card.append(slotsWrap);
     list.append(card);

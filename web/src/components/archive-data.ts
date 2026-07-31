@@ -12,6 +12,7 @@
  * 着色：仅用 CSS 令牌（var(--up)/var(--down) 等），不写死颜色。
  * ========================================================================== */
 import { getDsa, SLOT_ORDER } from '../dsa';
+import type { FragmentMeta } from '../dsa';
 
 /** 时段码升序（用于阈值比较）。 */
 export const SLOT_CODES = ['0900', '0930', '1200', '1430', '1800'];
@@ -44,6 +45,8 @@ export interface ArchiveSlot {
   code: string;
   label: string;
   fragments: Record<string, string | null>;
+  /** U3 加法字段：仅 manifest 来源的今日数据携带；reports-index 历史数据无此字段。 */
+  fragmentMeta?: Record<string, FragmentMeta | null>;
 }
 
 /** 某日归档桶：时段列表。 */
@@ -145,6 +148,7 @@ export async function buildArchiveMap(): Promise<ArchiveMap> {
           code,
           label: s.label || SLOT_LABEL[code] || code,
           fragments: s.fragments || {},
+          fragmentMeta: s.fragmentMeta,
         });
       }
     }

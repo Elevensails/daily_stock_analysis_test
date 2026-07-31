@@ -28,6 +28,10 @@ __all__ = [
     "CheckResult",
     "ValidationResult",
     "JudgeConfig",
+    "Paragraph",
+    "ViolationSegment",
+    "split_paragraphs",
+    "locate_violations",
     "validate",
     "gate_report",
     "append_reject_record",
@@ -45,6 +49,53 @@ class CheckResult:
 
 
 @dataclass
+class Paragraph:
+    """段落切分结果（U3 修改策略：违规段定位的最小单元）。
+
+    行号为 1-based 闭区间 ``[line_start, line_end]``，与编辑器行号一致。
+    """
+
+    index: int
+    line_start: int
+    line_end: int
+    text: str
+
+
+@dataclass
+class ViolationSegment:
+    """结构化违规段指针（U3 修改策略 §3.1 跨文件契约）。
+
+    ``granularity`` ∈ ``paragraph | document``（``sentence`` 预留 P2-1）；
+    ``document`` 级（``paragraph_index=None``）表示无法定位到具体段落
+    （如 LLM judge 整体低分），此类段**不可被 safe_degrade 剥离**。
+    """
+
+    check: str
+    severity: str
+    reason: str
+    quote: "str | None" = None
+    granularity: str = "paragraph"
+    paragraph_index: "int | None" = None
+    line_start: "int | None" = None
+    line_end: "int | None" = None
+
+    def to_dict(self) -> dict:
+        """输出 §3.1 契约 schema（location 嵌套结构）。"""
+        return {
+            "check": self.check,
+            "severity": self.severity,
+            "reason": self.reason,
+            "quote": self.quote,
+            "location": {
+                "granularity": self.granularity,
+                "paragraph_index": self.paragraph_index,
+                "line_start": self.line_start,
+                "line_end": self.line_end,
+            },
+        }
+
+
+@dataclass
 class ValidationResult:
     """一次校验的总体结果。"""
 
@@ -52,6 +103,8 @@ class ValidationResult:
     score: float  # 0..1，越高越可信
     reasons: list[str] = field(default_factory=list)
     checks: list[CheckResult] = field(default_factory=list)
+    # U3 修改策略：结构化违规段（fail 时由 locate_violations 填充；加法字段）
+    violation_segments: list[ViolationSegment] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -59,6 +112,7 @@ class ValidationResult:
             "score": round(self.score, 3),
             "reasons": self.reasons,
             "checks": [asdict(c) for c in self.checks],
+            "violation_segments": [s.to_dict() for s in self.violation_segments],
         }
 
 
@@ -185,6 +239,129 @@ def _check_numeric_source(text: str, source_facts: dict) -> Optional[CheckResult
     return CheckResult("numeric_source", True, "关键数字与行情源一致", "warn")
 
 
+# ---------------------------------------------------------------------------
+# U3 修改策略：段落切分 + 违规段定位（只加结构化定位层，判定逻辑零改动）
+# ---------------------------------------------------------------------------
+
+_QUOTE_MAX_LEN = 80  # quote 摘录上限（§3.1：≤80 字）
+
+
+def split_paragraphs(text: str) -> "list[Paragraph]":
+    """按空行把全文切分为段落，记录 1-based 行号区间。
+
+    连续非空行归入同一段；纯空白行是段落分隔符。空文本返回空列表。
+    """
+    paragraphs: list[Paragraph] = []
+    lines = text.split("\n")
+    buf: list[str] = []
+    start_line = 0
+    for lineno, line in enumerate(lines, start=1):
+        if line.strip():
+            if not buf:
+                start_line = lineno
+            buf.append(line)
+        else:
+            if buf:
+                paragraphs.append(Paragraph(
+                    index=len(paragraphs),
+                    line_start=start_line,
+                    line_end=lineno - 1,
+                    text="\n".join(buf),
+                ))
+                buf = []
+    if buf:
+        paragraphs.append(Paragraph(
+            index=len(paragraphs),
+            line_start=start_line,
+            line_end=len(lines),
+            text="\n".join(buf),
+        ))
+    return paragraphs
+
+
+def _clip_quote(snippet: str) -> str:
+    """把违规命中文本裁剪到 ``_QUOTE_MAX_LEN`` 字以内（单行化）。"""
+    one_line = " ".join(snippet.split())
+    return one_line[:_QUOTE_MAX_LEN]
+
+
+def _locate_red_line(para: Paragraph) -> "ViolationSegment | None":
+    for pat, msg in _RED_LINE_PATTERNS:
+        m = re.search(pat, para.text, re.IGNORECASE)
+        if m:
+            return ViolationSegment(
+                check="red_line", severity="critical", reason=msg,
+                quote=_clip_quote(m.group(0)), granularity="paragraph",
+                paragraph_index=para.index,
+                line_start=para.line_start, line_end=para.line_end,
+            )
+    return None
+
+
+def _locate_by_recheck(
+    para: Paragraph,
+    check_fn: "Callable[[str], Optional[CheckResult]]",
+) -> "ViolationSegment | None":
+    """对单段复跑同一检查函数；段内复现 fail 则产出 paragraph 级 segment。"""
+    cr = check_fn(para.text)
+    if cr is not None and not cr.passed:
+        return ViolationSegment(
+            check=cr.name, severity=cr.severity, reason=cr.detail,
+            quote=_clip_quote(para.text), granularity="paragraph",
+            paragraph_index=para.index,
+            line_start=para.line_start, line_end=para.line_end,
+        )
+    return None
+
+
+def locate_violations(
+    text: str,
+    checks: "list[CheckResult]",
+    *,
+    source_facts: Optional[dict] = None,
+) -> "list[ViolationSegment]":
+    """对已 fail 的检查项做段落级复扫定位，产出结构化违规段列表。
+
+    双层策略（判定逻辑零改动）：全文级 pass/fail 结论由 :func:`validate`
+    按现有逻辑得出；本函数仅对 **fail 的检查项** 逐段复跑同一规则，
+    命中段 → ``paragraph`` 级 segment；段内均无法复现（如跨段矛盾、
+    LLM judge 整体低分）→ 回退一条 ``document`` 级 segment，保证
+    每个失败检查项至少产出 1 条 segment。
+    """
+    segments: list[ViolationSegment] = []
+    paragraphs = split_paragraphs(text)
+    for check in checks:
+        if check.passed:
+            continue
+        located: list[ViolationSegment] = []
+        for para in paragraphs:
+            seg: "ViolationSegment | None" = None
+            if check.name == "red_line":
+                seg = _locate_red_line(para)
+            elif check.name == "self_consistency":
+                seg = _locate_by_recheck(para, _check_internal_consistency)
+            elif check.name == "impossible_move":
+                seg = _locate_by_recheck(para, _check_impossible_value)
+            elif check.name == "ungrounded":
+                seg = _locate_by_recheck(para, _check_ungrounded)
+            elif check.name == "numeric_source" and source_facts:
+                seg = _locate_by_recheck(
+                    para, lambda t: _check_numeric_source(t, source_facts)
+                )
+            if seg is not None:
+                located.append(seg)
+        if located:
+            segments.extend(located)
+        else:
+            # 定位不到（llm_judge / 跨段矛盾等）→ document 级 segment
+            segments.append(ViolationSegment(
+                check=check.name, severity=check.severity, reason=check.detail,
+                quote=None, granularity="document",
+                paragraph_index=None, line_start=None, line_end=None,
+            ))
+    return segments
+
+
 def validate(
     text: str,
     *,
@@ -276,7 +453,19 @@ def validate(
         score = 0.0
     score = max(0.0, min(1.0, score))
     passed = (not critical_failed) and (score >= config.min_score)
-    return ValidationResult(passed=passed, score=score, reasons=reasons, checks=checks)
+    result = ValidationResult(
+        passed=passed, score=score, reasons=reasons, checks=checks
+    )
+    # U3 修改策略：fail 时补充结构化违规段定位（加法层，判定结论不受影响）
+    if not passed:
+        try:
+            result.violation_segments = locate_violations(
+                text, checks, source_facts=source_facts
+            )
+        except Exception:
+            # 定位层绝不反噬判定主流程（保底空列表）
+            result.violation_segments = []
+    return result
 
 
 def gate_report(

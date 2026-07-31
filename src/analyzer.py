@@ -4824,6 +4824,7 @@ def call_rewrite_llm(
     *,
     model: "str | None" = None,
     temperature: float = 0.1,
+    segments: "list | None" = None,
 ) -> str:
     """模块级薄封装：``litellm.completion``（复用 analyzer 已配置的 litellm 与 env 密钥）。
 
@@ -4846,9 +4847,31 @@ def call_rewrite_llm(
         or os.environ.get("LITELLM_MODEL")
         or DEFAULT_LITELLM_MODEL
     )
+    # P2-1 预留：segments（结构化违规段指针）。本期仅在 user prompt 尾部附加
+    # 段指针提示，不做段级 patch 合并；后续 P2-1 可基于 segments 做差量改写。
+    effective_user_prompt = user_prompt
+    if segments:
+        pointer_lines: list = []
+        for seg in segments:
+            try:
+                if hasattr(seg, "to_dict"):
+                    seg = seg.to_dict()
+                loc = seg.get("location", {}) if isinstance(seg, dict) else {}
+                idx = loc.get("paragraph_index")
+                reason = seg.get("reason", "") if isinstance(seg, dict) else ""
+                if idx is not None:
+                    pointer_lines.append(f"- 第{idx}段：{reason}")
+            except Exception:
+                continue
+        if pointer_lines:
+            effective_user_prompt = (
+                user_prompt
+                + "\n\n【违规段指针（仅改以下段落，其余逐字保留）】\n"
+                + "\n".join(pointer_lines)
+            )
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
+        {"role": "user", "content": effective_user_prompt},
     ]
     resp = litellm.completion(
         model=effective_model,

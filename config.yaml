@@ -44,12 +44,15 @@ analysis_style:
 # thresholds：各类阈值 / 开关默认（H1 默认行为对齐）
 # ---------------------------------------------------------------------
 thresholds:
-  # repair 最大轮数（硬上限 3，超出会被 clamp）。
-  repair_max_rounds: 1
+  # repair 最大轮数（硬上限 3，超出会被 clamp）。U3 修改策略默认 1→2。
+  repair_max_rounds: 2
   # U3 事后校验 gate 总开关。
   judge_enabled: true
   # 是否启用真实 LLM judge（false 时仅做规则校验）。
   judge_use_llm: false
+  # U3 修改策略：安全降级发布开关（false 时轮数耗尽回退 reject-only，与旧行为一致）。
+  # 环境变量 SAFE_DEGRADE_ENABLED 优先于此处。
+  safe_degrade_enabled: true
   # 生成温度（LLM_TEMPERATURE 镜像，范围 0.0 ~ 2.0）。
   generation_temperature: 0.7
   # 生成 max_tokens 默认。

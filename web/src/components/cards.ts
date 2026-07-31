@@ -48,11 +48,16 @@ export function slotCard(code: string, slot: SlotEntry): HTMLElement {
   for (const t of ['report', 'market_review', 'vibe']) {
     const file = frags[t];
     if (file) {
-      links.append(
-        el('a', { class: 'chip chip--ok', href: `${TYPE_HREF[t]}#${file.replace(/\.html$/, '')}` }, [
-          TYPE_LABELS[t],
-        ])
+      const chip = el(
+        'a',
+        { class: 'chip chip--ok', href: `${TYPE_HREF[t]}#${file.replace(/\.html$/, '')}` },
+        [TYPE_LABELS[t]]
       );
+      // U3 加法字段：降级片段附「已降级」角标（optional chaining，旧数据无感）
+      if (slot.fragmentMeta?.[t]?.degraded) {
+        chip.append(el('span', { class: 'dsa-degraded-badge', text: '已降级' }));
+      }
+      links.append(chip);
     } else {
       links.append(el('span', { class: 'chip chip--pending' }, [`${TYPE_LABELS[t]} · 待生成`]));
     }

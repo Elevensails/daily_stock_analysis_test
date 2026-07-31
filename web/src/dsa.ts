@@ -3,10 +3,18 @@
  * 契约 schema 见 U2-architecture.md §2。前端只消费数据，不关心后端语言。
  * ========================================================================== */
 
+/** 片段元信息（U3 加法字段）：仅降级片段携带；旧 manifest 无此字段。 */
+export interface FragmentMeta {
+  degraded?: boolean;
+  removedSegments?: number;
+}
+
 export interface SlotEntry {
   label?: string;
   name?: string;
   fragments?: Record<string, string | null>;
+  /** U3 加法字段：type → 元信息；缺失时渲染与旧版逐像素一致。 */
+  fragmentMeta?: Record<string, FragmentMeta | null>;
 }
 
 export interface DsaManifest {

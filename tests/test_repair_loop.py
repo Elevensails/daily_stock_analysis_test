@@ -200,6 +200,164 @@ def test_gate_report_log_false_does_not_write(tmp_path: Path):
     assert not Path(log).exists()
 
 
+# ---------------------------------------------------------------------------
+# U3 修改策略新增（P0-2 定向改段 / P0-3 最新原因回传 / P1-1 温度透传）。
+# 既有 19 个用例原样保留，以上均为加法扩展。
+# ---------------------------------------------------------------------------
+
+# 多段样本：仅第 2 段（0 起始段号）踩红线，其余段干净
+MULTI_BAD = (
+    "# 600036 招商银行 复盘\n\n"
+    "今日收盘报 38.12 元，微跌 0.34%，成交额 18.6 亿。\n\n"
+    "建议现价买入，目标价 15.80 元，稳赚不赔。\n\n"
+    "北向资金小幅净流出，短期以观望为主。\n\n"
+    "> 以上分析基于公开数据，不构成投资建议。"
+)
+
+
+def test_p02_targeted_prompt_contains_segment_pointer():
+    """P0-2：重写 prompt 必须携带结构化段指针（段号 + 原文引用）。"""
+    prompts: list[str] = []
+
+    def fake_llm(system, user):
+        prompts.append(user)
+        return REDLINE_FIXED
+
+    res = repair_report(
+        MULTI_BAD,
+        reasons=["[红线] 含具体买入建议与价位"],
+        report_kind="report",
+        max_rounds=2,
+        llm_call=fake_llm,
+    )
+    assert res.passed is True
+    assert res.final_action == "emit"
+    assert prompts, "llm_call 未被调用"
+    # 段指针：定位到第 2 段（0 起始段号）
+    assert "第 2 段" in prompts[0]
+    # 原文引用送达模型（定向改段依据）
+    assert "买入" in prompts[0]
+
+
+def test_p02_explicit_segments_param_used():
+    """P0-2：显式传入 violation_segments 时应直接采用（emit 桥接通道）。"""
+    from src.core.validator import ViolationSegment
+
+    prompts: list[str] = []
+
+    def fake_llm(system, user):
+        prompts.append(user)
+        return REDLINE_FIXED
+
+    seg = ViolationSegment(
+        check="red_line", severity="critical",
+        reason="含具体买入建议与价位", quote="建议现价买入",
+        granularity="paragraph", paragraph_index=2, line_start=5, line_end=5,
+    )
+    res = repair_report(
+        MULTI_BAD,
+        reasons=["[红线] 含具体买入建议与价位"],
+        violation_segments=[seg],
+        report_kind="report",
+        max_rounds=2,
+        llm_call=fake_llm,
+    )
+    assert res.final_action == "emit"
+    assert "第 2 段" in prompts[0]
+    assert "建议现价买入" in prompts[0]
+
+
+def test_p03_latest_reasons_fed_to_next_round():
+    """P0-3：第 N 轮 prompt 必须使用第 N-1 轮 validate 的最新原因（非首轮原因）。"""
+    prompts: list[str] = []
+    seq = [
+        "该股今日涨停，但收跌 -5.0%。",      # 第 1 轮产物：红线已修，但引入自相矛盾
+        "该股今日小幅下跌 5.0%，量能温和。",  # 第 2 轮产物：干净
+    ]
+    calls = {"n": 0}
+
+    def fake_llm(system, user):
+        prompts.append(user)
+        i = calls["n"]
+        calls["n"] += 1
+        return seq[i % len(seq)]
+
+    res = repair_report(
+        REDLINE_BAD,
+        reasons=["[红线] 含具体买入建议与价位"],
+        report_kind="report",
+        max_rounds=2,
+        llm_call=fake_llm,
+    )
+    assert res.passed is True
+    assert res.rounds == 2
+    assert len(prompts) == 2
+    # 第 1 轮 prompt：喂首轮红线原因
+    assert "含具体买入建议与价位" in prompts[0]
+    # 第 2 轮 prompt：喂最新一轮的自相矛盾原因，且不再重复已修复的红线原因
+    assert "自相矛盾" in prompts[1]
+    assert "含具体买入建议与价位" not in prompts[1]
+    # 第 2 轮的待修订正文应为第 1 轮修订稿（渐进修复，非从原文重来）
+    assert seq[0] in prompts[1]
+
+
+def test_p03_last_reasons_recorded_on_reject():
+    """P0-3：终态结果须携带末轮最新原因（last_reasons），供 jsonl 回查。"""
+    def fake_llm(system, user):
+        return "该股今日涨停，但收跌 -5.0%。"  # 始终自相矛盾
+
+    res = repair_report(
+        REDLINE_BAD,
+        reasons=["[红线] 含具体买入建议与价位"],
+        report_kind="report",
+        max_rounds=2,
+        llm_call=fake_llm,
+        safe_degrade_enabled=False,  # 关闭降级，验证纯 reject 路径
+    )
+    assert res.final_action == "reject"
+    assert res.last_reasons, "last_reasons 不应为空"
+    assert any("自相矛盾" in r for r in res.last_reasons)
+
+
+def test_p11_temperature_and_model_passthrough():
+    """P1-1：llm_call 声明 temperature/model 关键字时必须真正透传。"""
+    seen: dict = {}
+
+    def fake_llm(system, user, *, temperature=None, model=None):
+        seen["temperature"] = temperature
+        seen["model"] = model
+        return REDLINE_FIXED
+
+    res = repair_report(
+        REDLINE_BAD,
+        reasons=["[红线] 含具体买入建议与价位"],
+        report_kind="report",
+        model="deepseek/deepseek-v4-flash",
+        max_rounds=2,
+        temperature=0.55,
+        llm_call=fake_llm,
+    )
+    assert res.final_action == "emit"
+    assert seen["temperature"] == 0.55
+    assert seen["model"] == "deepseek/deepseek-v4-flash"
+
+
+def test_p11_two_param_mock_still_compatible():
+    """P1-1 兼容性守卫：纯两参 (system, user) mock 不得被透传破坏。"""
+    def fake_llm(system, user):  # 无 temperature/model 关键字
+        return REDLINE_FIXED
+
+    res = repair_report(
+        REDLINE_BAD,
+        reasons=["[红线] 含具体买入建议与价位"],
+        report_kind="report",
+        max_rounds=2,
+        temperature=0.9,  # 即便显式给温度，也不应传给两参 mock
+        llm_call=fake_llm,
+    )
+    assert res.final_action == "emit"
+
+
 def test_append_reject_record_extra_fields(tmp_path: Path):
     log = str(tmp_path / "judge_rejects.jsonl")
     result: ValidationResult = validate(NORMAL, report_kind="stock")

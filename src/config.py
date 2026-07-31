@@ -1228,9 +1228,10 @@ class Config:
     # --- holdings 组 ---
     default_stock_list: str = DEFAULT_STOCK_LIST           # 默认持仓（替代散落裸串）
     # --- thresholds 组 ---
-    repair_max_rounds: int = 1                             # 硬上限 3（字段赋值处 min(_,3)）
+    repair_max_rounds: int = 2                             # 硬上限 3（字段赋值处 min(_,3)）；U3 修改策略默认 1→2
     judge_enabled: bool = True                            # U3 事后校验 gate 开关
     judge_use_llm: bool = False                           # 是否启用真实 LLM judge
+    safe_degrade_enabled: bool = True                     # U3 修改策略：安全降级发布开关（P0-7）
     generation_temperature: float = 0.7                   # 生成温度（LLM_TEMPERATURE 镜像）
     max_tokens: int = 2048                                # 生成 max_tokens 默认
     max_output_tokens: int = 8192                         # 生成 max_output_tokens 默认
@@ -2186,9 +2187,10 @@ class Config:
             # holdings 组
             default_stock_list=os.getenv('STOCK_LIST', _yaml_get(yaml_cfg, ['holdings', 'stock_list'], DEFAULT_STOCK_LIST)) or DEFAULT_STOCK_LIST,
             # thresholds 组
-            repair_max_rounds=min(parse_env_int(os.getenv('REPAIR_MAX_ROUNDS', _yaml_get(yaml_cfg, ['thresholds', 'repair_max_rounds'], 1)), 1, field_name='REPAIR_MAX_ROUNDS', minimum=0), 3),
+            repair_max_rounds=min(parse_env_int(os.getenv('REPAIR_MAX_ROUNDS', _yaml_get(yaml_cfg, ['thresholds', 'repair_max_rounds'], 2)), 2, field_name='REPAIR_MAX_ROUNDS', minimum=0), 3),
             judge_enabled=parse_env_bool(os.getenv('JUDGE_ENABLED'), default=bool(_yaml_get(yaml_cfg, ['thresholds', 'judge_enabled'], True))),
             judge_use_llm=parse_env_bool(os.getenv('JUDGE_USE_LLM'), default=bool(_yaml_get(yaml_cfg, ['thresholds', 'judge_use_llm'], False))),
+            safe_degrade_enabled=parse_env_bool(os.getenv('SAFE_DEGRADE_ENABLED'), default=bool(_yaml_get(yaml_cfg, ['thresholds', 'safe_degrade_enabled'], True))),
             generation_temperature=parse_env_float(os.getenv('LLM_TEMPERATURE', _yaml_get(yaml_cfg, ['thresholds', 'generation_temperature'], 0.7)), 0.7, field_name='LLM_TEMPERATURE', minimum=0.0, maximum=2.0),
             max_tokens=parse_env_int(_yaml_get(yaml_cfg, ['thresholds', 'max_tokens'], 2048), 2048, field_name='MAX_TOKENS', minimum=1),
             max_output_tokens=parse_env_int(_yaml_get(yaml_cfg, ['thresholds', 'max_output_tokens'], 8192), 8192, field_name='MAX_OUTPUT_TOKENS', minimum=1),
