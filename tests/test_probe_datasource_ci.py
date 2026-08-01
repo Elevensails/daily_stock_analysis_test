@@ -206,3 +206,68 @@ def test_main_writes_atomic_out_file(monkeypatch, tmp_path):
     assert out_path.exists()
     parsed = json.loads(out_path.read_text(encoding="utf-8"))
     assert parsed["summary"]["raw_ok"] == 2
+
+
+# ═════════════════════════════════════════════════════════════
+# QA 补强：进程级契约（上面的用例全部是「进程内调用 main()」，
+# 抓不到「main() 已返回但解释器退不掉」这类挂起，
+# 而 CI workflow 第 49 行恰恰是以子进程方式跑这个脚本的）
+# ═════════════════════════════════════════════════════════════
+class TestProbeScriptProcessContract:
+    """脚本被「直接运行」时的进程级契约：必须真正退出且 rc=0。"""
+
+    SCRIPT = os.path.join(SCRIPTS_DIR, "probe_datasource_ci.py")
+
+    def test_script_runs_standalone_and_exits_zero_fast_path(self):
+        """`python scripts/probe_datasource_ci.py --help` 必须 rc=0 且秒退。
+
+        校验脚本可独立运行（sys.path 自举正确、无相对 import 崩溃），
+        且该路径不触碰 akshare，因此离线也稳定。
+        """
+        import subprocess
+
+        proc = subprocess.run(
+            [sys.executable, self.SCRIPT, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert proc.returncode == 0, f"stderr={proc.stderr[-500:]}"
+        assert "probe_datasource_ci" in proc.stdout
+
+    @pytest.mark.network
+    def test_script_full_run_actually_terminates(self, tmp_path):
+        """完整探测必须在预算内**真正退出**，而不是产出报告后卡在解释器退出。
+
+        回归背景：akshare 会拉起 mini-racer 的 JS 事件循环线程，
+        其 atexit 钩子 join 该线程会永久阻塞进程退出。此时
+        `main()` 已返回 0、报告也已落盘，但 shell 永远拿不到 rc，
+        CI 只能等到 `timeout-minutes: 15` 被判失败。
+        """
+        import subprocess
+
+        out_path = tmp_path / "probe-result.json"
+        try:
+            proc = subprocess.run(
+                [
+                    sys.executable, self.SCRIPT,
+                    "--chip-timeout", "5",
+                    "--news-timeout", "5",
+                    "--raw-timeout", "5",
+                    "--out", str(out_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            pytest.fail(
+                "probe 脚本 120s 内未退出：main() 已完成但进程挂在 atexit "
+                "join（mini-racer run_event_loop 线程）。CI 会等到 "
+                "timeout-minutes: 15 才被杀，canary 恒红。"
+            )
+
+        assert proc.returncode == 0, (
+            f"canary 脚本必须永远 rc=0，实际 {proc.returncode}；"
+            f"stderr={proc.stderr[-500:]}"
+        )

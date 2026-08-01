@@ -1,0 +1,226 @@
+classDiagram
+    direction LR
+
+    class ChipUnavailableReason {
+        <<enumeration>>
+        OK
+        NOT_APPLICABLE
+        DISABLED
+        NO_CREDENTIAL
+        CIRCUIT_OPEN
+        EMPTY
+        FETCH_FAILED
+        +severity() int
+        +to_context_status() ContextFieldStatus
+    }
+
+    class ChipDistribution {
+        +str code
+        +str date
+        +str source
+        +float profit_ratio
+        +float avg_cost
+        +float cost_90_low
+        +float cost_90_high
+        +float concentration_90
+        +float cost_70_low
+        +float cost_70_high
+        +float concentration_70
+        +to_dict() Dict
+        +get_chip_status(current_price) str
+    }
+
+    class ChipFetchResult {
+        +Optional~ChipDistribution~ chip
+        +ChipUnavailableReason reason
+        +str detail
+        +str source
+        +int latency_ms
+        +ok() bool
+        +is_not_applicable() bool
+        +should_record_failure() bool
+        +should_record_provider_run() bool
+        +to_context_status() str
+        +ok_of(chip, source, latency_ms) ChipFetchResult$
+        +na(detail, source) ChipFetchResult$
+        +empty(detail, source) ChipFetchResult$
+        +failed(detail, source) ChipFetchResult$
+        +no_credential(source) ChipFetchResult$
+    }
+
+    class ChipFetchPolicy {
+        +bool force_user_agent
+        +str referer
+        +int max_retries
+        +float retry_backoff_seconds
+        +float request_timeout_seconds
+        +bool allow_tushare_fallback
+        +bool disable_akshare_chip
+        +from_config(config) ChipFetchPolicy$
+    }
+
+    class ChipDiagnostics {
+        -Lock _lock
+        -int attempted
+        -int succeeded
+        -int not_applicable
+        -int failed
+        -int empty
+        +record(result) None
+        +summary_line() str
+        +reset() None
+    }
+
+    class ChipCapableFetcher {
+        <<interface>>
+        +get_chip_distribution(code) Optional~ChipDistribution~
+        +get_chip_distribution_ex(code) ChipFetchResult
+    }
+
+    class AkshareFetcher {
+        -ChipFetchPolicy _chip_policy
+        +get_chip_distribution(code) Optional~ChipDistribution~
+        +get_chip_distribution_ex(code) ChipFetchResult
+        -_classify_chip_exception(exc) ChipUnavailableReason
+        -_apply_chip_policy() None
+        -_set_random_user_agent() None
+        -_enforce_rate_limit() None
+    }
+
+    class TushareFetcher {
+        +get_chip_distribution(code) Optional~ChipDistribution~
+        +get_chip_distribution_ex(code) ChipFetchResult
+        -_has_credential() bool
+    }
+
+    class FetcherManager {
+        +get_chip_distribution(code) Optional~ChipDistribution~
+        +get_chip_distribution_ex(code) ChipFetchResult
+        -_aggregate_chip_reason(results) ChipUnavailableReason
+        -_get_fetchers_snapshot() List
+    }
+
+    class ContextFieldStatus {
+        <<enumeration>>
+        AVAILABLE
+        MISSING
+        NOT_SUPPORTED
+        FALLBACK
+        STALE
+        ESTIMATED
+        PARTIAL
+        FETCH_FAILED
+    }
+
+    ChipCapableFetcher <|.. AkshareFetcher : implements
+    ChipCapableFetcher <|.. TushareFetcher : implements
+    FetcherManager o-- ChipCapableFetcher : iterates by priority
+    ChipFetchResult *-- ChipUnavailableReason : reason
+    ChipFetchResult o-- ChipDistribution : chip (nullable)
+    AkshareFetcher *-- ChipFetchPolicy : _chip_policy
+    FetcherManager ..> ChipDiagnostics : records
+    FetcherManager ..> ChipFetchResult : returns
+    ChipUnavailableReason ..> ContextFieldStatus : maps to
+
+    class NewsItem {
+        <<TypedDict>>
+        +str title
+        +str summary
+        +str date
+        +str source
+        +str origin
+        +str url
+    }
+
+    class NewsSourceTrace {
+        +str hit_source
+        +List~str~ attempted
+        +Dict~str,int~ counts
+        +float elapsed_ms
+        +bool budget_exceeded
+    }
+
+    class NewsRetrievalResult {
+        +str block
+        +NewsSourceTrace trace
+    }
+
+    class RagNewsModule {
+        <<module src/rag/news.py>>
+        +retrieve_news(code, name, search_service, config) str
+        +retrieve_news_ex(code, name, search_service, config) NewsRetrievalResult
+        -_resolve_neodata_script(config) Optional~Path~
+        -_neodata_news(code, name, timeout, config) List~NewsItem~
+        -_parse_neodata_news(raw) List~NewsItem~
+        -_akshare_news(code, name, config) List~NewsItem~
+        -_parse_news_date(raw) str
+        -_within_lookback(date_str, days) bool
+        -_search_service_fallback(code, name, svc) List~NewsItem~
+        -_deduplicate_news(items, prefix_chars) List~NewsItem~
+        -_format_news_block(items) str
+    }
+
+    class AkshareNewsClient {
+        <<module src/rag/_akshare_client.py>>
+        -float _last_call_ts
+        -int _consecutive_failures
+        -Lock _lock
+        -ThreadPoolExecutor _executor
+        +fetch_stock_news(symbol, timeout, max_retries) Optional~DataFrame~
+        +is_circuit_open() bool
+        +reset() None
+        -_enforce_min_interval() None
+        -_record_failure() None
+        -_record_success() None
+    }
+
+    class NewsDiagnostics {
+        -Lock _lock
+        -Dict~str,int~ hits
+        +record(trace) None
+        +summary_line() str
+        +reset() None
+    }
+
+    class RagRetriever {
+        <<module src/rag/retriever.py>>
+        +retrieve_all(code, name, search_service, config) RagContext
+    }
+
+    class SourceTrace {
+        +str dimension
+        +str primary_source
+        +str actual_source
+        +float elapsed_ms
+        +bool success
+        +str error
+    }
+
+    RagNewsModule ..> NewsItem : produces
+    RagNewsModule ..> AkshareNewsClient : uses (NO data_provider dep)
+    RagNewsModule ..> NewsRetrievalResult : returns
+    NewsRetrievalResult *-- NewsSourceTrace
+    RagRetriever ..> RagNewsModule : calls retrieve_news_ex
+    RagRetriever ..> NewsDiagnostics : records
+    RagRetriever ..> SourceTrace : builds from NewsSourceTrace
+
+    class Config {
+        <<src/config.py>>
+        +bool enable_chip_distribution
+        +bool enable_rag
+        +float rag_neodata_timeout_seconds
+        +int rag_news_dedup_title_chars
+        +str rag_neodata_script_path
+        +bool rag_akshare_news_enabled
+        +float rag_akshare_news_timeout_seconds
+        +int rag_akshare_news_max_items
+        +int rag_akshare_news_lookback_days
+        +int rag_akshare_news_max_retries
+        +float rag_news_total_budget_seconds
+        +bool rag_news_merge_sources
+        +int rag_news_min_items
+        +from_env() Config$
+    }
+
+    Config ..> ChipFetchPolicy : from_config
+    Config ..> RagNewsModule : drives behavior

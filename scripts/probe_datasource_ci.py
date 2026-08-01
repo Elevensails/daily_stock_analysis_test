@@ -359,4 +359,23 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # ────────────────────────────────────────────────────────────────
+    # 强制退出（BUG-2 修复）
+    # ────────────────────────────────────────────────────────────────
+    # 现象：main() 已返回 rc=0 且报告已落盘（主逻辑约 5s 跑完），但进程挂死不退。
+    # 根因：akshare 内部依赖 py_mini_racer，其 `_running_event_loop` 守护线程在
+    #       解释器退出阶段被 atexit 钩子 join，永远等不到事件循环结束
+    #       （faulthandler 栈停在 py_mini_racer/_mini_racer.py:368）。
+    # 对策：本脚本是「只读探测 + 原子写产物」的 canary，退出时没有需要 flush 的
+    #       业务状态。因此先手工 flush 两个标准流（保证 JSON 产物与 summary 不丢），
+    #       再用 os._exit() 跳过 atexit / 线程 join 直接返回退出码。
+    # 约束：不改 main() 内部逻辑与返回值语义 —— rc 依旧原样透传给 shell。
+    try:
+        _rc = main()
+    except SystemExit as _exc:
+        # argparse 的 --help（code=0）/ 参数错误（code=2）走这里，
+        # 同样要经由 os._exit 强制退出，避免任何路径落回 atexit。
+        _rc = _exc.code if isinstance(_exc.code, int) else 0
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(_rc)

@@ -22,7 +22,6 @@ P1.6 变更点（docs/p1.6-arch-design.md §3.4 / §3.5）
 """
 
 import logging
-import os
 import re
 import subprocess
 import sys
@@ -33,17 +32,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ._akshare_client import fetch_stock_news, is_circuit_open
+from ._neodata_resolver import resolve_neodata_script
 
 logger = logging.getLogger(__name__)
-
-# neodata query.py 候选路径（按序探测）。
-# 注意：这里**不再**硬编码任何开发者机器的用户名路径（P1.1 遗留问题），
-# 只保留与用户无关的相对/家目录形式。真正的绝对路径请通过
-# ``RAG_NEODATA_SCRIPT_PATH`` 或 config.yaml rag.neodata_script_path 指定。
-_NEODATA_RELATIVE_CANDIDATES = (
-    Path(".workbuddy/skills/neodata-financial-search/scripts/query.py"),
-    Path(".claude/skills/neodata-financial-search/scripts/query.py"),
-)
 
 # 新闻源标识（唯一真源，禁止在别处写裸字符串）
 SOURCE_NEODATA = "neodata"
@@ -105,29 +96,13 @@ def _resolve_neodata_script(config: Any = None) -> Optional[Path]:
 
     Returns:
         存在的脚本路径；全部探测不到返回 None（CI 上的正常情况）
+
+    Note:
+        真实实现已抽到 :mod:`src.rag._neodata_resolver`（唯一真源），
+        与 ``financial.py`` 共用，避免两处逻辑漂移；本函数保留为薄封装，
+        以维持既有调用方与测试桩点（``news._resolve_neodata_script``）不变。
     """
-    explicit = ""
-    if config is not None:
-        explicit = str(getattr(config, "rag_neodata_script_path", "") or "").strip()
-    if not explicit:
-        explicit = str(os.getenv("RAG_NEODATA_SCRIPT_PATH", "") or "").strip()
-
-    if explicit:
-        candidate = Path(explicit).expanduser()
-        if candidate.exists():
-            return candidate
-        logger.debug("[RAG.news] 配置的 neodata 脚本路径不存在: %s", candidate)
-
-    try:
-        home = Path.home()
-    except Exception:  # 某些容器环境无 HOME
-        return None
-
-    for relative in _NEODATA_RELATIVE_CANDIDATES:
-        candidate = home / relative
-        if candidate.exists():
-            return candidate
-    return None
+    return resolve_neodata_script(config, log_prefix="RAG.news")
 
 
 def retrieve_news(

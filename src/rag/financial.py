@@ -13,7 +13,6 @@ U6 RAG — 财报检索子模块
 
 import json
 import logging
-import os
 import re
 import subprocess
 import sys
@@ -21,25 +20,25 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from ._neodata_resolver import resolve_neodata_script
+
 logger = logging.getLogger(__name__)
 
-# neodata query.py 脚本路径
-_NEODATA_SCRIPT_PATH = Path(
-    os.path.expandvars(
-        r"C:\Users\29096\.workbuddy\skills\neodata-financial-search\scripts\query.py"
-    )
-)
 
+def _resolve_neodata_script(config: Any = None) -> Optional[Path]:
+    """解析 neodata ``query.py`` 路径，探测不到时返回 None。
 
-def _resolve_neodata_script() -> Optional[Path]:
-    """解析 neodata query.py 路径，不存在时返回 None。"""
-    if _NEODATA_SCRIPT_PATH.exists():
-        return _NEODATA_SCRIPT_PATH
-    # 也尝试通过 skills 目录查找
-    alt = Path(os.path.expanduser("~/.workbuddy/skills/neodata-financial-search/scripts/query.py"))
-    if alt.exists():
-        return alt
-    return None
+    P1.6 修复：原实现硬编码了开发者机器的绝对路径，换机 / CI 必然失败。
+    现统一复用 :func:`src.rag._neodata_resolver.resolve_neodata_script`
+    的三级解析（config → env → 家目录候选），与 ``news.py`` 行为一致。
+
+    Args:
+        config: Config 实例，可为 None
+
+    Returns:
+        存在的脚本路径；探测不到返回 None
+    """
+    return resolve_neodata_script(config, log_prefix="RAG.financial")
 
 
 def retrieve_financial(
@@ -63,7 +62,7 @@ def retrieve_financial(
     timeout = getattr(config, 'rag_neodata_timeout_seconds', 8.0) if config else 8.0
 
     # ── 首选：neodata CLI ──
-    neodata_text = _neodata_financial(code, stock_name, timeout=timeout)
+    neodata_text = _neodata_financial(code, stock_name, timeout=timeout, config=config)
     if neodata_text:
         return neodata_text
 
@@ -76,15 +75,29 @@ def retrieve_financial(
     return ""
 
 
-def _neodata_financial(code: str, stock_name: str, *, timeout: float = 8.0) -> str:
+def _neodata_financial(
+    code: str,
+    stock_name: str,
+    *,
+    timeout: float = 8.0,
+    config: Any = None,
+) -> str:
     """通过 neodata CLI 检索财报数据。
+
+    Args:
+        code: 股票代码
+        stock_name: 股票名称
+        timeout: subprocess 超时秒数
+        config: Config 实例（用于解析 neodata 脚本路径），可为 None
 
     Returns:
         格式化的 markdown 表格字符串，失败返回 ""
     """
-    script_path = _resolve_neodata_script()
+    script_path = _resolve_neodata_script(config)
     if not script_path:
-        logger.warning("[RAG.financial] neodata 脚本不存在: %s", _NEODATA_SCRIPT_PATH)
+        # CI / 纯服务器环境没有 neodata skill 是预期内的正常降级，
+        # 用 debug 而非 warning，避免刷屏（与 news.py 行为对齐）。
+        logger.debug("[RAG.financial] neodata 脚本未配置或不存在，跳过该数据源")
         return ""
 
     query = f"{stock_name} 最新财报 市盈率 市净率 ROE 营收增速 净利润 净利润增速 毛利率 资产负债率"

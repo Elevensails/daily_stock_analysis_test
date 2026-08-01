@@ -1,0 +1,158 @@
+sequenceDiagram
+    autonumber
+    participant PL as pipeline.py:475
+    participant FM as FetcherManager
+    participant CB as ChipCircuitBreaker
+    participant AK as AkshareFetcher
+    participant TS as TushareFetcher
+    participant DG as ChipDiagnostics
+    participant NW as rag.news.retrieve_news_ex
+    participant ND as _neodata_news
+    participant AKN as _akshare_news
+    participant CLI as _akshare_client
+    participant SS as _search_service_fallback
+    participant AN as analyzer.py:3975
+    participant RL as report_language.py
+    participant CBd as analysis_context_builder
+
+    Note over PL,CBd: ═══ 阶段一：筹码分布 + 原因码跨层契约 ═══
+
+    PL->>FM: get_chip_distribution_ex(code)
+    FM->>FM: normalize_stock_code(code)
+
+    alt config.enable_chip_distribution == False
+        FM-->>PL: ChipFetchResult(reason=DISABLED)
+    else 功能开启
+        FM->>CB: is_available("akshare_chip")
+        CB-->>FM: True
+
+        FM->>AK: get_chip_distribution_ex(code)
+        AK->>AK: _is_etf_code / _is_hk_code / _is_us_code
+
+        alt 标的类型不适用（ETF 512400 / 159915）
+            AK-->>FM: ChipFetchResult(reason=NOT_APPLICABLE)
+            Note over FM,CB: 不调 record_failure<br/>也不调 record_inconclusive<br/>不计入失败率
+        else A股（600036 / 603823）
+            AK->>AK: _apply_chip_policy()  [UA/Referer, 分叉B 才生效]
+            AK->>AK: _enforce_rate_limit()
+            AK->>AK: ak.stock_cyq_em(symbol=code)
+
+            alt 成功且 df 非空
+                AK-->>FM: ChipFetchResult(chip, reason=OK)
+                FM->>CB: record_success("akshare_chip")
+                FM->>DG: record(OK)
+                FM-->>PL: ChipFetchResult(ok) 短路返回
+            else 返回空 DataFrame
+                AK-->>FM: ChipFetchResult(reason=EMPTY)
+                FM->>CB: record_inconclusive("akshare_chip")
+            else 抛异常
+                AK->>AK: _classify_chip_exception(exc)
+                AK-->>FM: ChipFetchResult(reason=FETCH_FAILED, detail)
+                FM->>CB: record_failure("akshare_chip", detail)
+            end
+        end
+
+        opt akshare 未成功 且 存在 TushareFetcher
+            FM->>TS: get_chip_distribution_ex(code)
+            alt 无 TUSHARE_TOKEN（CI 现状）
+                TS-->>FM: ChipFetchResult(reason=NO_CREDENTIAL)
+                Note over FM,CB: 静默跳过<br/>不计失败率、不熔断
+            else 有 token
+                TS->>TS: cyq_chips()  [15 次/日配额]
+                TS-->>FM: ChipFetchResult(...)
+            end
+        end
+
+        FM->>FM: _aggregate_chip_reason(results)  [取 severity 最大]
+        FM->>DG: record(final_result)
+        FM-->>PL: ChipFetchResult(chip=None, reason=NOT_APPLICABLE|FETCH_FAILED|EMPTY)
+    end
+
+    PL->>PL: metadata["chip_reason"] = result.reason.value
+    PL->>PL: metadata["chip_not_supported"] = result.is_not_applicable
+    PL->>PL: enhanced["chip_reason"] = result.reason.value
+
+    Note over PL,SS: ═══ 阶段二：RAG 新闻多源串行短路降级 ═══
+
+    PL->>NW: retrieve_news_ex(code, name, search_service, config)
+    NW->>NW: deadline = monotonic() + rag_news_total_budget_seconds (20s)
+
+    rect rgb(232, 245, 233)
+        Note over NW,ND: ① neodata —— 本地首选（N3 不变）
+        NW->>ND: _neodata_news(code, name, timeout=8.0, config)
+        ND->>ND: _resolve_neodata_script(config)<br/>config/env → ~/.workbuddy|.claude|.codebuddy → 仓库同级
+        alt 脚本存在（本地）
+            ND->>ND: subprocess.run([python, query.py, --query], timeout=8)
+            ND->>ND: _parse_neodata_news(raw)
+            ND-->>NW: [NewsItem × N]  source="neodata"
+        else 脚本不存在（CI，0 耗时）
+            ND-->>NW: []   logger.debug 级，非 warning
+        end
+    end
+
+    alt len(items) >= rag_news_min_items 且 not merge_sources
+        NW->>NW: 短路，跳过后续源
+    else 需继续降级
+        rect rgb(255, 249, 230)
+            Note over NW,CLI: ② akshare stock_news_em —— CI 主力（P0-2）
+            NW->>NW: remaining = deadline - monotonic()
+            alt 预算不足 或 rag_akshare_news_enabled == False
+                NW->>NW: 跳过，trace.budget_exceeded = True
+            else
+                NW->>AKN: _akshare_news(code, name, config)
+                AKN->>CLI: fetch_stock_news(symbol, timeout=min(6.0, remaining), max_retries=1)
+                CLI->>CLI: is_circuit_open()? / _enforce_min_interval()
+                CLI->>CLI: ThreadPoolExecutor.submit(ak.stock_news_em).result(timeout)
+                alt 成功
+                    CLI->>CLI: _record_success()
+                    CLI-->>AKN: DataFrame[关键词,新闻标题,新闻内容,发布时间,文章来源,新闻链接]
+                    AKN->>AKN: 列映射 → NewsItem{title,summary,date,source="akshare_em",origin,url}
+                    AKN->>AKN: _within_lookback(date, 7) 过滤（空日期保留）
+                    AKN->>AKN: 按 date 倒序，截 max_items=8
+                    AKN-->>NW: [NewsItem × M]
+                else 超时 / 异常（P0-4 静默降级）
+                    CLI->>CLI: _record_failure() → 连续 3 次则进程内熔断
+                    CLI-->>AKN: None
+                    AKN-->>NW: []   logger.warning，不抛异常
+                end
+            end
+        end
+    end
+
+    alt 仍未达 min_items
+        rect rgb(240, 240, 250)
+            Note over NW,SS: ③ search_service —— 末位兜底
+            NW->>NW: 检查剩余预算
+            NW->>SS: _search_service_fallback(code, name, search_service)
+            SS-->>NW: [NewsItem × K] 或 []
+        end
+    end
+
+    alt news_items 为空
+        NW-->>PL: NewsRetrievalResult(block="", trace{hit_source:"none"})
+    else
+        NW->>NW: _deduplicate_news(items, prefix_chars) → _format_news_block()
+        NW-->>PL: NewsRetrievalResult(block, trace{hit_source:"akshare_em", counts, elapsed_ms})
+    end
+
+    Note over PL,CBd: ═══ 阶段三：文案分流与上下文状态渲染 ═══
+
+    PL->>AN: build_prompt(context)
+    alt context 有 "chip"
+        AN->>AN: 渲染真实筹码数值表格（获利比例/平均成本/集中度）
+    else 无 "chip"
+        AN->>RL: get_chip_unavailable_text(lang, reason=context["chip_reason"])
+        alt reason == "not_applicable"
+            RL-->>AN: 「该标的类型（ETF/指数/港美股）无筹码分布数据，筹码维度不适用。」
+        else fetch_failed / empty / disabled / no_credential
+            RL-->>AN: 「筹码分布未启用或数据源暂不可用，未纳入筹码判断。」
+        end
+    end
+
+    PL->>CBd: build(artifacts)
+    CBd->>CBd: _build_chip_block() → ContextFieldStatus
+    Note over CBd: not_applicable → NOT_SUPPORTED<br/>fetch_failed → FETCH_FAILED<br/>其他 → MISSING
+
+    PL->>DG: summary_line()
+    DG-->>PL: [筹码汇总] 尝试 4 只 / 成功 2 / 不适用 2 / 失败 0 / 空数据 0
+    PL->>PL: [新闻汇总] 尝试 4 只 / neodata 0 / akshare 4 / search_service 0 / 空 0 / 超预算 0
