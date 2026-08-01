@@ -81,7 +81,7 @@ DEFAULT_RAW_TIMEOUT = 10.0
 #   / chip.retry_backoff_seconds
 DEFAULT_CHIP_FORCE_USER_AGENT = True
 DEFAULT_CHIP_REFERER = "https://quote.eastmoney.com"
-DEFAULT_CHIP_MAX_RETRIES = 2
+DEFAULT_CHIP_MAX_RETRIES = 0
 DEFAULT_CHIP_RETRY_BACKOFF = 1.5
 DEFAULT_CHIP_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "

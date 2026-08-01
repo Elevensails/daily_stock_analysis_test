@@ -1269,7 +1269,7 @@ class Config:
     # 这些字段由 ChipFetchPolicy.from_config() 读取（data_provider/realtime_types.py）。
     chip_force_user_agent: bool = True                    # 是否给筹码请求注入反爬头（UA/Referer）
     chip_referer: str = "https://quote.eastmoney.com"     # 注入的 Referer 头
-    chip_max_retries: int = 2                             # 筹码抓取失败重试次数（0 = 不重试）
+    chip_max_retries: int = 0                             # 筹码抓取失败重试次数（0 = 不重试）
     chip_retry_backoff_seconds: float = 1.5               # 指数退避基数（秒）
     chip_request_timeout_seconds: float = 10.0            # 单次筹码请求超时（秒，0 = 不注入）
     chip_allow_tushare_fallback: bool = True              # 是否允许 tushare 兜底（有 token 才生效）
@@ -2325,9 +2325,9 @@ class Config:
             chip_max_retries=parse_env_int(
                 os.getenv(
                     'CHIP_MAX_RETRIES',
-                    _yaml_get(yaml_cfg, ['chip', 'max_retries'], 2),
+                    _yaml_get(yaml_cfg, ['chip', 'max_retries'], 0),
                 ),
-                2, field_name='CHIP_MAX_RETRIES', minimum=0, maximum=10,
+                0, field_name='CHIP_MAX_RETRIES', minimum=0, maximum=10,
             ),
             chip_retry_backoff_seconds=parse_env_float(
                 os.getenv(
