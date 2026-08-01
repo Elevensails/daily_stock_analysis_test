@@ -62,6 +62,9 @@ def _seg_to_dict(seg: "ViolationSegment | dict") -> dict:
                 "paragraph_index": seg.get("paragraph_index"),
                 "line_start": seg.get("line_start"),
                 "line_end": seg.get("line_end"),
+                # P1.5 跨段配对字段透传（dataclass 路径经 to_dict() 已含）
+                "related_paragraph_index": seg.get("related_paragraph_index"),
+                "pairing": seg.get("pairing"),
             },
         }
     return {

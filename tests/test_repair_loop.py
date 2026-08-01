@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from src.core.repair import repair_report, RepairResult
+from src.core.repair import FINAL_EMIT_DEGRADED, repair_report, RepairResult
 from src.core.validator import (
     ValidationResult,
     append_reject_record,
@@ -356,6 +356,52 @@ def test_p11_two_param_mock_still_compatible():
         llm_call=fake_llm,
     )
     assert res.final_action == "emit"
+
+
+# ---------------------------------------------------------------------------
+# P1.5 self_consistency 跨段配对定位（增量扩展，不改动既有 19 用例）。
+# claim 段 0 含涨停，evidence 段 2 含负收益 → 跨段矛盾。
+# ---------------------------------------------------------------------------
+SELF_CONSISTENCY_CROSS = (
+    "# 600036 招商银行 复盘\n\n"
+    "该股今日强势涨停，封板后全天无抛压，资金高度认可。\n\n"
+    "技术面看量能温和放大，换手充分，短期趋势仍强。\n\n"
+    "该股今日收跌 -0.12%，量能萎缩，短期承压回落。\n\n"
+    "> 以上分析基于公开数据，不构成投资建议。"
+)
+
+
+def test_p15_cross_paragraph_self_consistency_terminal():
+    """P1.5：跨段 self_consistency 经 repair（模型不修）→ 降级发布 emit_degraded。
+
+    断言：终态为 emit_degraded（剥离 evidence 段，关联 claim 保留）；
+    降级稿过完整 gate；prompt 含关联段提示；degraded_segments 携带 pairing。
+    """
+    prompts: list[str] = []
+
+    def fake_llm(system, user):
+        prompts.append(user)
+        return SELF_CONSISTENCY_CROSS  # 模型始终不修，用于观察终态
+
+    res = repair_report(
+        SELF_CONSISTENCY_CROSS,
+        reasons=["[自相矛盾] 称涨停但出现负收益 -0.12%"],
+        report_kind="stock",
+        max_rounds=2,
+        llm_call=fake_llm,
+        safe_degrade_enabled=True,
+    )
+    assert res.final_action == FINAL_EMIT_DEGRADED
+    assert res.passed is True
+    assert "收跌 -0.12%" not in res.final_text
+    assert "强势涨停" in res.final_text  # 关联 claim 段保留
+    # 降级稿必须过完整 gate（永不 emit 不合格版）
+    assert validate(res.final_text, report_kind="stock").passed is True
+    # 终态段清单携带配对信息（jsonl 审计）
+    assert res.degraded_segments
+    assert res.degraded_segments[0]["location"]["pairing"] == "limit_up_vs_negative_pct"
+    # prompt 含关联段提示（模型定向修订时可一并核对矛盾两端）
+    assert any("关联段" in p for p in prompts)
 
 
 def test_append_reject_record_extra_fields(tmp_path: Path):

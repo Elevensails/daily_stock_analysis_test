@@ -73,8 +73,10 @@ class TestViolationSegments:
         seg = _redline_segments(MULTI_BAD)[0]
         d = seg.to_dict()
         assert set(d.keys()) == {"check", "severity", "reason", "quote", "location"}
+        # P1.5 契约扩展：location 加法携带 related_paragraph_index / pairing
         assert set(d["location"].keys()) == {
             "granularity", "paragraph_index", "line_start", "line_end",
+            "related_paragraph_index", "pairing",
         }
 
     def test_passed_result_has_empty_segments(self):
@@ -269,3 +271,31 @@ class TestRepairLoopDegradeIntegration:
         assert FINAL_EMIT == "emit"
         assert FINAL_EMIT_DEGRADED == "emit_degraded"
         assert FINAL_REJECT == "reject"
+
+
+# ---------------------------------------------------------------------------
+# 5. P1.5 self_consistency 跨段配对定位：根因修复（跨段矛盾不再空白报告）
+# ---------------------------------------------------------------------------
+# 涨停 claim 在段 0，负收益 evidence 在段 2（跨段矛盾，旧逻辑回退 document 级）
+SELF_CONSISTENCY_CROSS = (
+    "# 600036 招商银行 复盘\n\n"
+    "该股今日强势涨停，封板后全天无抛压，资金高度认可。\n\n"
+    "技术面看量能温和放大，换手充分，短期趋势仍强。\n\n"
+    "该股今日收跌 -0.12%，量能萎缩，短期承压回落。\n\n"
+    "> 以上分析基于公开数据，不构成投资建议。"
+)
+
+
+class TestP15SelfConsistencyCrossParagraph:
+    def test_cross_paragraph_no_document_fallback(self):
+        """P1.5：跨段矛盾产出 paragraph 级段，degrade 不再触发护栏 2 回退。"""
+        res = validate(SELF_CONSISTENCY_CROSS, report_kind="stock")
+        assert res.passed is False
+        sc = [s for s in res.violation_segments if s.check == "self_consistency"]
+        assert sc, "self_consistency 必须产出结构化段"
+        assert all(s.granularity == "paragraph" for s in sc)
+        assert all(s.paragraph_index is not None for s in sc)
+        # degrade 不再因 document 级触发护栏 2（历史根因：空白报告）
+        dres = assemble_degraded(SELF_CONSISTENCY_CROSS, sc, report_kind="stock")
+        assert dres.ok is True
+        assert dres.fallback_reason != "document_level_violation_not_removable"

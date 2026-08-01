@@ -68,6 +68,12 @@ class ViolationSegment:
     ``granularity`` ∈ ``paragraph | document``（``sentence`` 预留 P2-1）；
     ``document`` 级（``paragraph_index=None``）表示无法定位到具体段落
     （如 LLM judge 整体低分），此类段**不可被 safe_degrade 剥离**。
+
+    P1.5 跨段配对定位（加法字段，默认 ``None``，零破坏旧契约）：
+      * ``related_paragraph_index``：跨段矛盾中**矛盾来源段**（claim，如含
+        「涨停」标记），仅作上下文，degrade **不剥离**；
+      * ``pairing`` ∈ ``limit_up_vs_negative_pct | limit_down_vs_positive_pct``，
+        供日志 / 前端 / 运营分类，禁止拼写漂移。
     """
 
     check: str
@@ -78,6 +84,9 @@ class ViolationSegment:
     paragraph_index: "int | None" = None
     line_start: "int | None" = None
     line_end: "int | None" = None
+    # —— P1.5 跨段配对定位（加法字段，向后兼容）——
+    related_paragraph_index: "int | None" = None  # 矛盾来源段（claim），仅上下文
+    pairing: "str | None" = None                  # 配对类型，见上
 
     def to_dict(self) -> dict:
         """输出 §3.1 契约 schema（location 嵌套结构）。"""
@@ -91,6 +100,9 @@ class ViolationSegment:
                 "paragraph_index": self.paragraph_index,
                 "line_start": self.line_start,
                 "line_end": self.line_end,
+                # P1.5 跨段配对字段（加法）
+                "related_paragraph_index": self.related_paragraph_index,
+                "pairing": self.pairing,
             },
         }
 
@@ -314,6 +326,83 @@ def _locate_by_recheck(
     return None
 
 
+def _nearest_claim(
+    claims: "list[Paragraph]",
+    ev_index: int,
+) -> "Paragraph | None":
+    """从候选 claim 段中选与 evidence 段距离最近（按段落 index 绝对差）的一段。
+
+    P1.5 跨段配对定位器的子过程：给定所有含矛盾标记（涨停 / 跌停）的候选
+    claim 段，返回距 evidence 段（含反向涨跌幅）最近的 claim，使「矛盾两端」
+    在位置上尽量贴近，便于模型与运营定位。无候选时返回 ``None``。
+    """
+    if not claims:
+        return None
+    return min(claims, key=lambda p: abs(p.index - ev_index))
+
+
+def _locate_self_consistency(
+    paragraphs: "list[Paragraph]",
+) -> "list[ViolationSegment]":
+    """跨段配对定位（P1.5）：把全文级 self_consistency 矛盾落到 paragraph 级。
+
+    :func:`_check_internal_consistency` 已判 fail（全文同时含 涨停/跌停 标记
+    与反向涨跌幅），但二者可能分属不同段落 → 逐段复扫无法复现 → 旧逻辑回退
+    document 级 → degrade 拒绝。本函数独立配对：
+
+      * 涨停 claim 段 ↔ 负收益 evidence 段；
+      * 跌停 claim 段 ↔ 正收益 evidence 段。
+
+    每条 evidence 段产出 1 个 paragraph 级 segment（``paragraph_index``=evidence
+    待剥离；``related_paragraph_index``=最近 claim 仅上下文），彻底消除
+    self_consistency 的 document 级回退。
+
+    纯函数、无副作用；check 已 fail 即保证全文含标记 + 反向涨跌幅，故必能
+    产出 ≥1 条 paragraph 级段（document 级回退在本函数调用方处仅作死代码兜底）。
+    """
+    segments: list[ViolationSegment] = []
+    claims_up = [p for p in paragraphs if _LIMIT_UP_RE.search(p.text)]
+    claims_down = [p for p in paragraphs if _LIMIT_DOWN_RE.search(p.text)]
+
+    # ① 涨停 claim ↔ 负收益 evidence
+    for ev in paragraphs:
+        neg = re.search(r"-\d{1,2}(?:\.\d+)?\s*%", ev.text)
+        if not neg:
+            continue
+        claim = _nearest_claim(claims_up, ev.index)
+        if claim is None:
+            continue  # 全文无涨停标记，本 evidence 不构成跨段矛盾
+        segments.append(ViolationSegment(
+            check="self_consistency", severity="critical",
+            reason=f"跨段矛盾：称涨停但第 {ev.index} 段出现负收益 {neg.group(0)}",
+            quote=_clip_quote(ev.text), granularity="paragraph",
+            paragraph_index=ev.index,
+            line_start=ev.line_start, line_end=ev.line_end,
+            related_paragraph_index=claim.index,
+            pairing="limit_up_vs_negative_pct",
+        ))
+
+    # ② 跌停 claim ↔ 正收益 evidence
+    for ev in paragraphs:
+        pos = re.search(r"([+\-]?\d{1,2}(?:\.\d+)?)\s*%", ev.text)
+        if not pos or float(pos.group(1)) <= 0:
+            continue
+        claim = _nearest_claim(claims_down, ev.index)
+        if claim is None:
+            continue
+        segments.append(ViolationSegment(
+            check="self_consistency", severity="critical",
+            reason=f"跨段矛盾：称跌停但第 {ev.index} 段出现正收益 {pos.group(0)}",
+            quote=_clip_quote(ev.text), granularity="paragraph",
+            paragraph_index=ev.index,
+            line_start=ev.line_start, line_end=ev.line_end,
+            related_paragraph_index=claim.index,
+            pairing="limit_down_vs_positive_pct",
+        ))
+
+    return segments
+
+
 def locate_violations(
     text: str,
     checks: "list[CheckResult]",
@@ -324,9 +413,13 @@ def locate_violations(
 
     双层策略（判定逻辑零改动）：全文级 pass/fail 结论由 :func:`validate`
     按现有逻辑得出；本函数仅对 **fail 的检查项** 逐段复跑同一规则，
-    命中段 → ``paragraph`` 级 segment；段内均无法复现（如跨段矛盾、
-    LLM judge 整体低分）→ 回退一条 ``document`` 级 segment，保证
-    每个失败检查项至少产出 1 条 segment。
+    命中段 → ``paragraph`` 级 segment；段内均无法复现（如 LLM judge 整体低分）
+    → 回退一条 ``document`` 级 segment，保证每个失败检查项至少产出 1 条 segment。
+
+    P1.5 特例：``self_consistency`` 分支先尝试**段内复现**（同段既含标记又含
+    反向涨跌幅，罕见但优先）；段内复扫均失败 → **跨段配对定位**
+    :func:`_locate_self_consistency`，必产出 paragraph 级段，不再回退 document 级。
+    其他 check 仍走原分支，document 级回退逻辑**完全保留**。
     """
     segments: list[ViolationSegment] = []
     paragraphs = split_paragraphs(text)
@@ -334,26 +427,36 @@ def locate_violations(
         if check.passed:
             continue
         located: list[ViolationSegment] = []
-        for para in paragraphs:
-            seg: "ViolationSegment | None" = None
-            if check.name == "red_line":
-                seg = _locate_red_line(para)
-            elif check.name == "self_consistency":
-                seg = _locate_by_recheck(para, _check_internal_consistency)
-            elif check.name == "impossible_move":
-                seg = _locate_by_recheck(para, _check_impossible_value)
-            elif check.name == "ungrounded":
-                seg = _locate_by_recheck(para, _check_ungrounded)
-            elif check.name == "numeric_source" and source_facts:
-                seg = _locate_by_recheck(
-                    para, lambda t: _check_numeric_source(t, source_facts)
-                )
-            if seg is not None:
-                located.append(seg)
+
+        if check.name == "self_consistency":
+            # ① 先尝试段内复现（同段既含标记又含反向涨跌幅，优先）
+            for p in paragraphs:
+                seg = _locate_by_recheck(p, _check_internal_consistency)
+                if seg is not None:
+                    located.append(seg)
+            # ② 段内复扫失败 → 跨段配对定位（P1.5）：必产出 paragraph 级段
+            if not located:
+                located.extend(_locate_self_consistency(paragraphs))
+        else:
+            for para in paragraphs:
+                seg: "ViolationSegment | None" = None
+                if check.name == "red_line":
+                    seg = _locate_red_line(para)
+                elif check.name == "impossible_move":
+                    seg = _locate_by_recheck(para, _check_impossible_value)
+                elif check.name == "ungrounded":
+                    seg = _locate_by_recheck(para, _check_ungrounded)
+                elif check.name == "numeric_source" and source_facts:
+                    seg = _locate_by_recheck(
+                        para, lambda t: _check_numeric_source(t, source_facts)
+                    )
+                if seg is not None:
+                    located.append(seg)
+
         if located:
             segments.extend(located)
         else:
-            # 定位不到（llm_judge / 跨段矛盾等）→ document 级 segment
+            # 定位不到（llm_judge / 其他跨段矛盾等）→ document 级 segment
             segments.append(ViolationSegment(
                 check=check.name, severity=check.severity, reason=check.detail,
                 quote=None, granularity="document",

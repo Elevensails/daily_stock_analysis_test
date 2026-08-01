@@ -1,0 +1,41 @@
+sequenceDiagram
+    participant E as emit_frontend_artifacts.py
+    participant V as validator.py
+    participant R as repair.py
+    participant A as analyzer.call_rewrite_llm
+    participant D as degrade.py
+    participant L as logs/judge_rejects.jsonl
+
+    E->>V: gate_report(md, log=False)
+    V->>V: validate() 判定 self_consistency fail
+    V->>V: locate_violations() 段落级定位<br/>self_consistency 分支：<br/>段内复扫失败 → _locate_self_consistency()<br/>配对 claim(涨停) ↔ evidence(-0.12%)
+    V-->>E: ValidationResult{passed=False,<br/>violation_segments=[paragraph 级,<br/>paragraph_index=evidence,<br/>related_paragraph_index=claim,<br/>pairing=limit_up_vs_negative_pct]}
+
+    E->>R: repair_report(md, reasons, violation_segments,<br/>max_rounds=2, safe_degrade_enabled=True, llm_call)
+
+    loop 第 i 轮 (i ≤ 2)
+        R->>R: _segments_block() 渲染「第 evidence 段<br/>（关联段 claim 为矛盾来源）」
+        R->>A: _call_llm_compat(system, user, model, temperature)
+        A-->>R: 定向修订后的完整 markdown
+        R->>V: validate(rewritten) 完整复检
+        alt 复检通过
+            V-->>R: passed=True
+            R-->>E: RepairResult{final_action="emit"}
+        else 仍 fail
+            V-->>R: 最新 reasons + violation_segments → 下一轮
+        end
+    end
+
+    Note over R: 轮数耗尽仍 fail（跨段矛盾难一次修掉）
+    R->>D: assemble_degraded(current, latest_segments)
+    D->>D: 仅剥离 paragraph_index=evidence 段<br/>（related_paragraph_index=claim 不剥离）<br/>插 DEGRADED_PLACEHOLDER<br/>护栏: 剥离比≤50% 且段可定位
+    D->>V: validate(degraded_text) 复检<br/>（涨停 claim 保留，负收益 evidence 已移除 → 通过）
+    alt 复检通过
+        D-->>R: DegradeResult{ok=True, removed_ratio<<0.5}
+        R-->>E: RepairResult{final_action="emit_degraded",<br/>degraded_segments=[含 pairing/related]}
+        E->>L: append_reject_record(final_action="emit_degraded",<br/>degraded_segments, ...)
+        Note over E,L: 用户看到「含占位条的报告」而非空白
+    else 复检仍 fail / 护栏触发
+        D-->>R: DegradeResult{ok=False}
+        R-->>E: RepairResult{final_action="reject"}
+    end

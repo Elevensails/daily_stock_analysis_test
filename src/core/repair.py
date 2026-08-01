@@ -77,12 +77,22 @@ def _segments_block(segments: "list | None") -> str:
         check = sd.get("check", "")
         reason = sd.get("reason", "")
         quote = sd.get("quote")
+        related_idx = loc.get(
+            "related_paragraph_index", sd.get("related_paragraph_index")
+        )
+        pairing = loc.get("pairing", sd.get("pairing"))
         if granularity == "paragraph" and para_idx is not None:
             head = f"- 第 {para_idx} 段（0 起始段号，check={check}）：{reason}"
         else:
             head = f"- 全文级（check={check}）：{reason}"
         if quote:
             head += f"\n  原文引用：「{quote}」"
+        # P1.5 跨段配对：关联段为矛盾来源，提示模型定向修订时一并核对
+        if related_idx is not None:
+            hint = f"第 {related_idx} 段"
+            if pairing:
+                hint += f"（配对类型={pairing}）"
+            head += f"\n  （关联段 {hint} 为其矛盾来源，请一并核对）"
         lines.append(head)
     return "\n".join(lines) if lines else "-（无段级定位，请整体复核合规）"
 

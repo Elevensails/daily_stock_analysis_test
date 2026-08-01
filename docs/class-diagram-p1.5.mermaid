@@ -1,0 +1,78 @@
+classDiagram
+    class ViolationSegment {
+        +str check
+        +str severity
+        +str reason
+        +str quote
+        +str granularity
+        +int paragraph_index
+        +int line_start
+        +int line_end
+        +int related_paragraph_index
+        +str pairing
+        +to_dict() dict
+    }
+    class ValidationResult {
+        +bool passed
+        +float score
+        +list~str~ reasons
+        +list~CheckResult~ checks
+        +list~ViolationSegment~ violation_segments
+        +to_dict() dict
+    }
+    class Paragraph {
+        +int index
+        +int line_start
+        +int line_end
+        +str text
+    }
+    class RepairResult {
+        +bool passed
+        +str final_text
+        +int rounds
+        +bool rewritten
+        +str final_action
+        +list repair_reasons
+        +list last_reasons
+        +list~dict~ degraded_segments
+    }
+    class DegradeResult {
+        +bool ok
+        +str degraded_text
+        +list~dict~ removed_segments
+        +float removed_ratio
+        +str fallback_reason
+    }
+    class validator_module {
+        +split_paragraphs(text) list~Paragraph~
+        +locate_violations(text, checks) list~ViolationSegment~
+        +_locate_self_consistency(paragraphs) list~ViolationSegment~
+        +_nearest_claim(claims, ev_index) Paragraph
+        +validate(text, ...) ValidationResult
+        +gate_report(text, ...) ValidationResult
+    }
+    class repair_module {
+        +FINAL_EMIT: str
+        +FINAL_EMIT_DEGRADED: str
+        +FINAL_REJECT: str
+        +repair_report(text, ..., safe_degrade_enabled) RepairResult
+        -_segments_block(segments) str
+        -_build_rewrite_prompt(text, reasons, segments, facts, kind) tuple
+        -_call_llm_compat(llm_call, system, user, model, temperature) str
+    }
+    class degrade_module {
+        +DEGRADED_PLACEHOLDER: str
+        +assemble_degraded(text, segments, ...) DegradeResult
+        -_seg_to_dict(seg) dict
+    }
+
+    ValidationResult *-- CheckResult
+    ValidationResult *-- ViolationSegment
+    validator_module ..> Paragraph : 内部切分
+    validator_module --> ValidationResult : 产出
+    repair_module ..> validator_module : validate() 完整复检
+    repair_module ..> degrade_module : 超限时 assemble_degraded()
+    repair_module --> RepairResult : 产出
+    degrade_module ..> validator_module : 降级稿复检
+    degrade_module --> DegradeResult : 产出
+    repair_module ..> repair_module : _segments_block 渲染关联段
