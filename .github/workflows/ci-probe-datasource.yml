@@ -1,0 +1,85 @@
+name: CI Datasource Probe (P1.6)
+
+# P1.6 数据源实证探测：手动触发（有网环境运行）。
+# 本 workflow 仅作为「反爬 / 接口变更」的 canary，永不因探测失败而标红 CI。
+# 价值在于产物 JSON + 日志，供人工复盘东财是否改了接口 / 加强了反爬。
+on:
+  workflow_dispatch:
+    inputs:
+      chip_timeout:
+        description: '筹码分布单次调用超时（秒）'
+        required: false
+        default: '10'
+      news_timeout:
+        description: '新闻单次调用超时（秒）'
+        required: false
+        default: '12'
+      raw_timeout:
+        description: '裸 requests 直连东财超时（秒）'
+        required: false
+        default: '10'
+
+# 整体兜底超时：即便所有数据源 hang，也不会无限占着 runner。
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v5
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 📦 Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 🌐 运行数据源探测（永不非零退出）
+        id: probe
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python scripts/probe_datasource_ci.py \
+            --chip-timeout ${{ github.event.inputs.chip_timeout || '10' }} \
+            --news-timeout ${{ github.event.inputs.news_timeout || '12' }} \
+            --raw-timeout ${{ github.event.inputs.raw_timeout || '10' }} \
+            --out probe-result.json | tee probe-console.log
+
+      - name: 📤 上传探测产物
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: datasource-probe-${{ github.run_number }}
+          path: |
+            probe-result.json
+            probe-console.log
+          if-no-files-found: ignore
+
+      - name: 🔎 打印结论摘要
+        if: always()
+        run: |
+          echo "===== 探测结论（来自 probe-result.json）====="
+          if [ -f probe-result.json ]; then
+            python - <<'PY'
+          import json
+          try:
+              rep = json.load(open("probe-result.json", encoding="utf-8"))
+          except Exception as exc:
+              print("无法解析 probe-result.json:", exc)
+              raise SystemExit(0)
+          s = rep.get("summary", {})
+          print("overall      :", s.get("overall"))
+          print("chip  ok/empty/error/skip :", s.get("chip_ok"), s.get("chip_empty"), s.get("chip_error"), s.get("chip_skip"))
+          print("news  ok/empty/error/skip :", s.get("news_ok"), s.get("news_empty"), s.get("news_error"), s.get("news_skip"))
+          print("raw   ok/error/skip       :", s.get("raw_ok"), s.get("raw_error"), s.get("raw_skip"))
+          PY
+          else
+            echo "probe-result.json 未生成"
+          fi

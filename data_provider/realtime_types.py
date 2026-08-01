@@ -16,7 +16,7 @@
 
 import logging
 import time
-from threading import RLock
+from threading import Lock, RLock
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, Union
 from enum import Enum
@@ -281,6 +281,356 @@ class ChipDistribution:
         return "，".join(status_parts)
 
 
+# ============================================
+# P1.6 筹码原因码跨层契约
+# ============================================
+# 设计背景（docs/p1.6-arch-design.md §3.2）：
+#   旧接口 get_chip_distribution() 只返回 Optional[ChipDistribution]，
+#   "ETF 本就无筹码" 与 "接口挂了" 在 None 处无法区分，信息在数据层被丢弃。
+#   本节引入 ChipFetchResult 原因码回传，采用「并列新增 _ex 入口 + 旧签名降为 shim」
+#   的零破坏迁移方案，既有 6 处生产调用与 8 处测试引用无需改动。
+
+class ChipUnavailableReason(str, Enum):
+    """筹码不可用原因码。
+
+    继承 ``str`` 使其可直接 JSON 序列化 / 写入 metadata，
+    跨层传递时统一使用 ``.value``（禁止裸字符串构造）。
+    """
+
+    OK = "ok"                          # 成功取到有效筹码数据
+    NOT_APPLICABLE = "not_applicable"  # 标的类型本就无筹码（ETF/指数/港股/美股）
+    DISABLED = "disabled"              # config.enable_chip_distribution=False 或整源关闭
+    NO_CREDENTIAL = "no_credential"    # 无凭证（如 tushare 缺 TUSHARE_TOKEN）
+    CIRCUIT_OPEN = "circuit_open"      # 熔断中，本轮跳过
+    EMPTY = "empty"                    # 接口通但返回空 / 字段不完整
+    FETCH_FAILED = "fetch_failed"      # 网络异常 / HTTP 错误 / 解析异常
+
+    @property
+    def severity(self) -> int:
+        """聚合排序用严重度。数值越大越"像故障"。
+
+        多源全部失败时，取 severity 最大者作为最终原因码
+        （见 docs/p1.6-arch-design.md §7.3 唯一真源表）。
+        """
+        return _CHIP_REASON_SEVERITY[self.value]
+
+    def to_context_status(self) -> str:
+        """映射到既有 ContextFieldStatus 取值（不造新枚举）。
+
+        Returns:
+            ``available`` / ``not_supported`` / ``fetch_failed`` / ``missing``
+        """
+        return _CHIP_REASON_TO_CONTEXT_STATUS.get(self.value, "missing")
+
+
+# 严重度表与状态映射表抽为模块级常量，避免每次属性访问重建字典
+_CHIP_REASON_SEVERITY: Dict[str, int] = {
+    "ok": -1,
+    "disabled": -1,
+    "not_applicable": 0,
+    "circuit_open": 1,
+    "no_credential": 2,
+    "empty": 3,
+    "fetch_failed": 4,
+}
+
+_CHIP_REASON_TO_CONTEXT_STATUS: Dict[str, str] = {
+    "ok": "available",
+    "not_applicable": "not_supported",
+    "fetch_failed": "fetch_failed",
+    # disabled / empty / no_credential / circuit_open 一律落 missing
+}
+
+
+@dataclass
+class ChipFetchResult:
+    """筹码抓取结果对象（Result Object 模式）。
+
+    取代裸 ``Optional[ChipDistribution]``，把"为什么没有数据"这一信息
+    从数据层完整传递到渲染层。
+    """
+
+    chip: Optional[ChipDistribution] = None
+    reason: ChipUnavailableReason = ChipUnavailableReason.FETCH_FAILED
+    detail: str = ""       # 简短诊断串，如 "ConnectionError: RemoteDisconnected"
+    source: str = ""       # 命中或最后尝试的 fetcher 名
+    latency_ms: int = 0
+    error_type: str = ""   # 原始异常类名（如 "RuntimeError"），用于兼容 run_diagnostics 的 error_type 字段
+
+    @property
+    def ok(self) -> bool:
+        """是否成功取到筹码数据。"""
+        return self.chip is not None and self.reason is ChipUnavailableReason.OK
+
+    @property
+    def is_not_applicable(self) -> bool:
+        """是否属于「标的类型本就无筹码」。"""
+        return self.reason is ChipUnavailableReason.NOT_APPLICABLE
+
+    @property
+    def should_record_failure(self) -> bool:
+        """熔断分流关键：仅真故障计入熔断，避免 ETF 把 akshare 筹码熔掉。"""
+        return self.reason is ChipUnavailableReason.FETCH_FAILED
+
+    @property
+    def should_record_inconclusive(self) -> bool:
+        """空数据释放 HALF_OPEN 探测名额，但不累加失败次数。"""
+        return self.reason is ChipUnavailableReason.EMPTY
+
+    @property
+    def should_record_provider_run(self) -> bool:
+        """NOT_APPLICABLE / NO_CREDENTIAL 不计入失败率（PRD US-3）。
+
+        另外 DISABLED / CIRCUIT_OPEN 本就未真正发起请求，同样不计。
+        """
+        return self.reason not in (
+            ChipUnavailableReason.NOT_APPLICABLE,
+            ChipUnavailableReason.NO_CREDENTIAL,
+            ChipUnavailableReason.DISABLED,
+            ChipUnavailableReason.CIRCUIT_OPEN,
+        )
+
+    def to_context_status(self) -> str:
+        """映射到 ContextFieldStatus 取值字符串。"""
+        return self.reason.to_context_status()
+
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为可 JSON 序列化的诊断字典（不含 chip 本体）。"""
+        return {
+            'reason': self.reason.value,
+            'detail': self.detail,
+            'source': self.source,
+            'latency_ms': self.latency_ms,
+            'error_type': self.error_type,
+            'ok': self.ok,
+        }
+
+    # ── 工厂方法（优先使用，避免手搓 reason）──
+    @classmethod
+    def ok_of(
+        cls,
+        chip: ChipDistribution,
+        source: str,
+        latency_ms: int = 0,
+    ) -> "ChipFetchResult":
+        """构造成功结果。"""
+        return cls(
+            chip=chip,
+            reason=ChipUnavailableReason.OK,
+            detail="",
+            source=source,
+            latency_ms=latency_ms,
+        )
+
+    @classmethod
+    def na(cls, detail: str, source: str, latency_ms: int = 0) -> "ChipFetchResult":
+        """构造「标的类型不适用」结果。"""
+        return cls(
+            chip=None,
+            reason=ChipUnavailableReason.NOT_APPLICABLE,
+            detail=detail,
+            source=source,
+            latency_ms=latency_ms,
+        )
+
+    @classmethod
+    def empty(cls, detail: str, source: str, latency_ms: int = 0) -> "ChipFetchResult":
+        """构造「接口通但返回空」结果。"""
+        return cls(
+            chip=None,
+            reason=ChipUnavailableReason.EMPTY,
+            detail=detail,
+            source=source,
+            latency_ms=latency_ms,
+        )
+
+    @classmethod
+    def failed(
+        cls,
+        detail: str,
+        source: str,
+        latency_ms: int = 0,
+        error_type: str = "",
+    ) -> "ChipFetchResult":
+        """构造「抓取失败」结果。
+
+        Args:
+            detail: 诊断串（通常含 ``异常类名: 原因``）
+            source: fetcher 名
+            latency_ms: 耗时
+            error_type: 原始异常类名（如 "RuntimeError"），用于兼容 run_diagnostics
+                的 error_type 字段；为空时上层回退到 ``reason.value``
+        """
+        return cls(
+            chip=None,
+            reason=ChipUnavailableReason.FETCH_FAILED,
+            detail=detail,
+            source=source,
+            latency_ms=latency_ms,
+            error_type=error_type,
+        )
+
+    @classmethod
+    def no_credential(cls, source: str, detail: str = "") -> "ChipFetchResult":
+        """构造「无凭证」结果（静默跳过，不计失败率、不熔断）。"""
+        return cls(
+            chip=None,
+            reason=ChipUnavailableReason.NO_CREDENTIAL,
+            detail=detail or "缺少数据源凭证，静默跳过",
+            source=source,
+        )
+
+    @classmethod
+    def disabled(cls, source: str, detail: str = "") -> "ChipFetchResult":
+        """构造「功能关闭」结果。"""
+        return cls(
+            chip=None,
+            reason=ChipUnavailableReason.DISABLED,
+            detail=detail or "筹码分布功能已关闭",
+            source=source,
+        )
+
+    @classmethod
+    def circuit_open(cls, source: str, detail: str = "") -> "ChipFetchResult":
+        """构造「熔断中」结果。"""
+        return cls(
+            chip=None,
+            reason=ChipUnavailableReason.CIRCUIT_OPEN,
+            detail=detail or "数据源处于熔断状态",
+            source=source,
+        )
+
+
+@dataclass(frozen=True)
+class ChipFetchPolicy:
+    """筹码抓取策略（Strategy-as-Data）。
+
+    CI 实证结论（docs/p1.6-ci-probe-guide.md 三分叉判读）的唯一落地载体：
+    三种实证结果 = 三组取值，代码路径唯一，不产生代码分叉。
+
+    - 分叉 A（CI 可用）：全部默认值，零改动
+    - 分叉 B（反爬/请求头）：force_user_agent=True + referer + max_retries=2
+    - 分叉 C（接口变更/封禁）：disable_akshare_chip=True + allow_tushare_fallback=True
+    """
+
+    force_user_agent: bool = False          # 是否真正注入 UA 到 requests session
+    referer: str = ""                       # 注入的 Referer 头
+    max_retries: int = 0                    # 失败重试次数（0 表示不重试）
+    retry_backoff_seconds: float = 1.5      # 指数退避基数
+    request_timeout_seconds: float = 10.0   # 单次请求超时（预留）
+    allow_tushare_fallback: bool = True     # 是否允许 tushare 兜底（有 token 才真正生效）
+    disable_akshare_chip: bool = False      # 确认 akshare 筹码接口已死时整源关闭
+
+    @classmethod
+    def from_config(cls, config: Any = None) -> "ChipFetchPolicy":
+        """从 Config 读取策略取值。
+
+        本期（P1.6）筹码侧刻意不新增 config 字段（YAGNI，见架构设计 §3.8），
+        因此这里对每个字段做 ``getattr`` 软读取：config 上没有对应属性时
+        直接落回类默认值。待 CI 实证落到分叉 B/C 时再按需外化配置项，
+        届时本方法无需改结构、只需字段生效。
+
+        Args:
+            config: Config 实例，可为 None
+
+        Returns:
+            ChipFetchPolicy 实例（永不抛异常）
+        """
+        if config is None:
+            return cls()
+
+        def _get(name: str, default: Any) -> Any:
+            value = getattr(config, name, None)
+            return default if value is None else value
+
+        try:
+            return cls(
+                force_user_agent=bool(_get('chip_force_user_agent', cls.force_user_agent)),
+                referer=str(_get('chip_referer', cls.referer)),
+                max_retries=max(0, int(_get('chip_max_retries', cls.max_retries))),
+                retry_backoff_seconds=float(
+                    _get('chip_retry_backoff_seconds', cls.retry_backoff_seconds)
+                ),
+                request_timeout_seconds=float(
+                    _get('chip_request_timeout_seconds', cls.request_timeout_seconds)
+                ),
+                allow_tushare_fallback=bool(
+                    _get('chip_allow_tushare_fallback', cls.allow_tushare_fallback)
+                ),
+                disable_akshare_chip=bool(
+                    _get('chip_disable_akshare', cls.disable_akshare_chip)
+                ),
+            )
+        except (TypeError, ValueError) as exc:
+            logger.debug("[筹码] ChipFetchPolicy 解析配置失败，回落默认值: %s", exc)
+            return cls()
+
+
+class ChipDiagnostics:
+    """筹码链路诊断计数器（线程安全）。
+
+    ``max_workers=5`` 并行下必须用锁保护计数；WebUI 长驻进程需在每轮
+    run 开始时调用 ``reset()``，避免跨 run 累加。
+    """
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self.attempted: int = 0
+        self.succeeded: int = 0
+        self.not_applicable: int = 0
+        self.failed: int = 0
+        self.empty: int = 0
+
+    def record(self, result: ChipFetchResult) -> None:
+        """记录一次筹码抓取的最终聚合结果。
+
+        Args:
+            result: FetcherManager 聚合后的 ChipFetchResult
+        """
+        if result is None:
+            return
+        with self._lock:
+            self.attempted += 1
+            if result.ok:
+                self.succeeded += 1
+            elif result.reason is ChipUnavailableReason.NOT_APPLICABLE:
+                self.not_applicable += 1
+            elif result.reason is ChipUnavailableReason.EMPTY:
+                self.empty += 1
+            elif result.reason is ChipUnavailableReason.FETCH_FAILED:
+                self.failed += 1
+            # DISABLED / NO_CREDENTIAL / CIRCUIT_OPEN 只累加 attempted，不归入任何故障桶
+
+    def snapshot(self) -> Dict[str, int]:
+        """返回当前计数快照（线程安全）。"""
+        with self._lock:
+            return {
+                'attempted': self.attempted,
+                'succeeded': self.succeeded,
+                'not_applicable': self.not_applicable,
+                'failed': self.failed,
+                'empty': self.empty,
+            }
+
+    def summary_line(self) -> str:
+        """生成可 grep 的汇总诊断行（格式见架构设计 §3.9）。"""
+        snap = self.snapshot()
+        return (
+            f"[筹码汇总] 尝试 {snap['attempted']} 只 / 成功 {snap['succeeded']} "
+            f"/ 不适用 {snap['not_applicable']} / 失败 {snap['failed']} "
+            f"/ 空数据 {snap['empty']}"
+        )
+
+    def reset(self) -> None:
+        """重置全部计数（每轮 run 开始时调用）。"""
+        with self._lock:
+            self.attempted = 0
+            self.succeeded = 0
+            self.not_applicable = 0
+            self.failed = 0
+            self.empty = 0
+
+
 class CircuitBreaker:
     """
     熔断器 - 管理数据源的熔断/冷却状态
@@ -453,6 +803,10 @@ _chip_circuit_breaker = CircuitBreaker(
 )
 
 
+# 筹码链路诊断计数器（进程内全局单例，P1.6 新增）
+_chip_diagnostics = ChipDiagnostics()
+
+
 def get_realtime_circuit_breaker() -> CircuitBreaker:
     """获取实时行情熔断器"""
     return _realtime_circuit_breaker
@@ -461,3 +815,8 @@ def get_realtime_circuit_breaker() -> CircuitBreaker:
 def get_chip_circuit_breaker() -> CircuitBreaker:
     """获取筹码接口熔断器"""
     return _chip_circuit_breaker
+
+
+def get_chip_diagnostics() -> ChipDiagnostics:
+    """获取筹码链路诊断计数器（进程内全局单例）。"""
+    return _chip_diagnostics

@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from src.schemas.analysis_context_pack import (
     AnalysisContextBlock,
@@ -314,25 +314,53 @@ def _build_technical_block(
     )
 
 
+# P1.6：筹码原因码 -> ContextFieldStatus 映射（复用既有枚举，不造新状态）
+# 见 docs/p1.6-arch-design.md §3.3；未列出的原因码一律落 MISSING。
+_CHIP_REASON_TO_CONTEXT_FIELD_STATUS = {
+    "not_applicable": ContextFieldStatus.NOT_SUPPORTED,
+    "fetch_failed": ContextFieldStatus.FETCH_FAILED,
+}
+
+
+def _resolve_chip_missing_status(metadata: Optional[Dict[str, Any]]) -> Tuple[ContextFieldStatus, str]:
+    """由 artifacts.metadata 推导筹码缺失时的上下文状态与原因串。
+
+    优先读取 P1.6 新增的 ``chip_reason``；缺失时回退到历史布尔键
+    ``chip_not_supported``，保证旧调用方/旧快照不受影响。
+
+    Args:
+        metadata: artifacts.metadata（可为 None）
+
+    Returns:
+        (ContextFieldStatus, missing_reason 字符串)
+    """
+    meta = metadata or {}
+    reason = str(meta.get("chip_reason") or "").strip().lower()
+    if reason:
+        status = _CHIP_REASON_TO_CONTEXT_FIELD_STATUS.get(reason, ContextFieldStatus.MISSING)
+        missing_reason = (
+            "chip_not_supported"
+            if status is ContextFieldStatus.NOT_SUPPORTED
+            else f"chip_{reason}"
+        )
+        return status, missing_reason
+
+    # 历史路径：只有布尔开关，无细粒度原因
+    if bool(meta.get("chip_not_supported")):
+        return ContextFieldStatus.NOT_SUPPORTED, "chip_not_supported"
+    return ContextFieldStatus.MISSING, "chip_distribution_missing"
+
+
 def _build_chip_block(artifacts: PipelineAnalysisArtifacts) -> AnalysisContextBlock:
     chip = _to_dict(artifacts.chip_data)
     if not chip:
-        not_supported = bool((artifacts.metadata or {}).get("chip_not_supported"))
-        status = (
-            ContextFieldStatus.NOT_SUPPORTED
-            if not_supported
-            else ContextFieldStatus.MISSING
-        )
+        status, missing_reason = _resolve_chip_missing_status(artifacts.metadata)
         return AnalysisContextBlock(
             status=status,
             items={
                 "chip_distribution": AnalysisContextItem(
                     status=status,
-                    missing_reason=(
-                        "chip_not_supported"
-                        if not_supported
-                        else "chip_distribution_missing"
-                    ),
+                    missing_reason=missing_reason,
                 )
             },
         )

@@ -2114,15 +2114,51 @@ class DataFetcherManager:
         """Shortcut kept for backward-compat with A-share general loop."""
         return self._supplement_quote(stock_code, primary_quote, "LongbridgeFetcher")
 
+    @staticmethod
+    def _aggregate_chip_reason(results: List["ChipFetchResult"]) -> "ChipFetchResult":
+        """多源全部未命中时，按 severity 选出最终原因码。
+
+        规则见 docs/p1.6-arch-design.md §7.3「原因码唯一真源表」：
+        severity 越大越"像故障"，取最大者作为对外暴露的原因，
+        保证「ETF 不适用」不会被「tushare 无 token」这类噪声覆盖，
+        同时「真故障」优先于「不适用」暴露给用户。
+
+        Args:
+            results: 各数据源返回的 ChipFetchResult 列表（可为空）
+
+        Returns:
+            聚合后的 ChipFetchResult（chip 恒为 None）
+        """
+        from .realtime_types import ChipFetchResult
+
+        if not results:
+            return ChipFetchResult.failed('无可用筹码数据源', 'manager')
+
+        best = results[0]
+        for item in results[1:]:
+            if item.reason.severity > best.reason.severity:
+                best = item
+
+        # 汇总各源明细，便于日志排查
+        detail_parts = [
+            f"{r.source or 'unknown'}={r.reason.value}"
+            + (f"({r.detail})" if r.detail else "")
+            for r in results
+        ]
+        return ChipFetchResult(
+            chip=None,
+            reason=best.reason,
+            detail='; '.join(detail_parts),
+            source=best.source,
+            latency_ms=sum(r.latency_ms for r in results),
+        )
+
     def get_chip_distribution(self, stock_code: str):
         """
-        获取筹码分布数据（带熔断和多数据源降级）
+        获取筹码分布数据（向后兼容 shim）
 
-        策略：
-        1. 检查配置开关
-        2. 检查熔断器状态
-        3. 依次尝试多个数据源：数据源优先级与获取daily的数据优先级一致
-        4. 所有数据源失败则返回 None（降级兜底）
+        P1.6 起真实逻辑迁移至 :meth:`get_chip_distribution_ex`，
+        本方法仅做「丢弃原因码」的降级适配，保证既有调用方零改动。
 
         Args:
             stock_code: 股票代码
@@ -2130,22 +2166,55 @@ class DataFetcherManager:
         Returns:
             ChipDistribution 对象，失败则返回 None
         """
+        return self.get_chip_distribution_ex(stock_code).chip
+
+    def get_chip_distribution_ex(self, stock_code: str) -> "ChipFetchResult":
+        """
+        获取筹码分布数据（带原因码，含熔断和多数据源降级）
+
+        策略：
+        1. 检查配置开关（关闭 → DISABLED）
+        2. 检查熔断器状态（熔断中 → 跳过该源，全部熔断 → CIRCUIT_OPEN）
+        3. 依次尝试多个数据源：数据源优先级与获取 daily 的数据优先级一致
+        4. 全部未命中时按 severity 聚合原因码（见 :meth:`_aggregate_chip_reason`）
+
+        熔断分流（P1.6 核心修复，PRD US-3）：
+        - 仅 ``FETCH_FAILED`` 计入 ``record_failure``
+        - ``EMPTY`` 走 ``record_inconclusive``（释放 HALF_OPEN 名额但不累加失败）
+        - ``NOT_APPLICABLE`` / ``NO_CREDENTIAL`` 完全不触碰熔断器、不计入失败率，
+          避免「批量分析 ETF」把 akshare 筹码源误熔断
+
+        Args:
+            stock_code: 股票代码
+
+        Returns:
+            ChipFetchResult，永不返回 None、永不抛异常
+        """
         # Normalize code (strip SH/SZ prefix etc.)
         stock_code = normalize_stock_code(stock_code)
 
-        from .realtime_types import get_chip_circuit_breaker
+        from .realtime_types import (
+            get_chip_circuit_breaker,
+            get_chip_diagnostics,
+            ChipFetchResult,
+            ChipUnavailableReason,
+        )
         from src.config import get_config
 
+        diagnostics = get_chip_diagnostics()
         config = get_config()
 
-        # 如果筹码分布功能被禁用，直接返回 None
+        # 如果筹码分布功能被禁用，直接返回 DISABLED（不计入诊断的故障桶）
         if not config.enable_chip_distribution:
             logger.debug(f"[筹码分布] 功能已禁用，跳过 {stock_code}")
-            return None
+            result = ChipFetchResult.disabled('manager', 'config.enable_chip_distribution=False')
+            diagnostics.record(result)
+            return result
 
         circuit_breaker = get_chip_circuit_breaker()
 
         candidate_fetchers = []
+        skipped_results: List[ChipFetchResult] = []
         # 直接遍历管理器已经按 priority 排好序的数据源列表
         for fetcher in self._get_fetchers_snapshot():
             # 只处理实现了筹码分布逻辑的数据源
@@ -2159,10 +2228,14 @@ class DataFetcherManager:
             # 检查熔断器状态
             if not circuit_breaker.is_available(source_key):
                 logger.debug(f"[熔断] {fetcher_name} 筹码接口处于熔断状态，尝试下一个")
+                skipped_results.append(
+                    ChipFetchResult.circuit_open(fetcher_name, f'{source_key} 熔断中')
+                )
                 continue
 
             candidate_fetchers.append((fetcher, fetcher_name, source_key))
 
+        attempt_results: List[ChipFetchResult] = []
         for index, (fetcher, fetcher_name, source_key) in enumerate(candidate_fetchers):
             fallback_to = (
                 candidate_fetchers[index + 1][1]
@@ -2170,63 +2243,143 @@ class DataFetcherManager:
                 else None
             )
             attempt_start = time.time()
-            try:
+            result = self._fetch_chip_from(fetcher, fetcher_name, stock_code, attempt_start)
+
+            # 成功但字段不完整/占位值 → 降级为 EMPTY，语义与旧实现保持一致
+            if result.ok and not _is_meaningful_chip_distribution(result.chip):
+                logger.warning(
+                    "[筹码分布] %s 返回字段不完整或占位值，继续尝试下一个数据源",
+                    fetcher_name,
+                )
+                result = ChipFetchResult.empty(
+                    'empty or incomplete chip distribution',
+                    result.source or fetcher_name,
+                    latency_ms=result.latency_ms,
+                )
+
+            # 仅真正发起过请求的尝试才计入 provider run 统计
+            if result.should_record_provider_run:
                 record_provider_run_started(
                     data_type="chip",
                     provider=fetcher_name,
                     operation="get_chip_distribution",
                 )
-                chip = self._call_fetcher_method(fetcher, 'get_chip_distribution', stock_code)
-                latency_ms = int((time.time() - attempt_start) * 1000)
-                if _is_meaningful_chip_distribution(chip):
+                if result.ok:
                     record_provider_run(
                         data_type="chip",
                         provider=fetcher_name,
                         operation="get_chip_distribution",
                         success=True,
-                        latency_ms=latency_ms,
+                        latency_ms=result.latency_ms,
                         record_count=1,
                     )
-                    circuit_breaker.record_success(source_key)
-                    logger.info(f"[筹码分布] {stock_code} 成功获取 (来源: {fetcher_name})")
-                    return chip
                 else:
                     record_provider_run(
                         data_type="chip",
                         provider=fetcher_name,
                         operation="get_chip_distribution",
                         success=False,
-                        latency_ms=latency_ms,
-                        error_type="empty",
-                        error_message="empty or incomplete chip distribution",
+                        latency_ms=result.latency_ms,
+                        # 兼容既有契约：失败原因优先用原始异常类名（如 RuntimeError），
+                        # 缺失时回退到 P1.6 新增的 ChipUnavailableReason 取值
+                        error_type=result.error_type or result.reason.value,
+                        error_message=result.detail,
                         fallback_to=fallback_to,
                         record_count=0,
                     )
-                    if chip is not None:
-                        logger.warning(
-                            "[筹码分布] %s 返回字段不完整或占位值，继续尝试下一个数据源",
-                            fetcher_name,
-                        )
-                    # 空结果或占位结果：释放 HALF_OPEN 探测名额，避免卡死
-                    circuit_breaker.record_inconclusive(source_key)
-            except Exception as e:
-                error_type, error_reason = summarize_exception(e)
-                record_provider_run(
-                    data_type="chip",
-                    provider=fetcher_name,
-                    operation="get_chip_distribution",
-                    success=False,
-                    latency_ms=int((time.time() - attempt_start) * 1000),
-                    error_type=error_type,
-                    error_message=error_reason,
-                    fallback_to=fallback_to,
-                )
-                logger.warning(f"[筹码分布] {fetcher_name} 获取 {stock_code} 失败: {e}")
-                circuit_breaker.record_failure(source_key, str(e))
-                continue
 
-        logger.warning(f"[筹码分布] {stock_code} 所有数据源均失败")
-        return None
+            # 熔断分流：只有真故障才伤害熔断器
+            if result.ok:
+                circuit_breaker.record_success(source_key)
+                logger.info(f"[筹码分布] {stock_code} 成功获取 (来源: {fetcher_name})")
+                diagnostics.record(result)
+                return result
+            if result.should_record_failure:
+                logger.warning(
+                    f"[筹码分布] {fetcher_name} 获取 {stock_code} 失败: {result.detail}"
+                )
+                circuit_breaker.record_failure(source_key, result.detail)
+            elif result.should_record_inconclusive:
+                # 空结果或占位结果：释放 HALF_OPEN 探测名额，避免卡死
+                circuit_breaker.record_inconclusive(source_key)
+            else:
+                # NOT_APPLICABLE / NO_CREDENTIAL / DISABLED：静默跳过，不触碰熔断器
+                logger.debug(
+                    f"[筹码分布] {fetcher_name} 跳过 {stock_code}: "
+                    f"{result.reason.value} ({result.detail})"
+                )
+
+            attempt_results.append(result)
+
+        final_result = self._aggregate_chip_reason(attempt_results + skipped_results)
+        if final_result.reason is ChipUnavailableReason.NOT_APPLICABLE:
+            logger.debug(f"[筹码分布] {stock_code} 标的类型无筹码数据，跳过")
+        else:
+            logger.warning(
+                f"[筹码分布] {stock_code} 未获取到数据: "
+                f"{final_result.reason.value} | {final_result.detail}"
+            )
+        diagnostics.record(final_result)
+        return final_result
+
+    def _fetch_chip_from(
+        self,
+        fetcher: BaseFetcher,
+        fetcher_name: str,
+        stock_code: str,
+        attempt_start: float,
+    ) -> "ChipFetchResult":
+        """从单个 fetcher 取筹码，统一归一为 ChipFetchResult。
+
+        兼容两类数据源：
+        - 已实现 ``get_chip_distribution_ex`` 的（akshare / tushare）：直接透传
+        - 只有旧 ``get_chip_distribution`` 的第三方/自定义源：按 None → EMPTY 归一
+
+        Args:
+            fetcher: 数据源实例
+            fetcher_name: 数据源名称
+            stock_code: 股票代码
+            attempt_start: 本次尝试开始时间戳（用于计算耗时）
+
+        Returns:
+            ChipFetchResult，永不抛异常
+        """
+        from .realtime_types import ChipFetchResult
+
+        try:
+            if hasattr(fetcher, 'get_chip_distribution_ex'):
+                result = self._call_fetcher_method(
+                    fetcher, 'get_chip_distribution_ex', stock_code
+                )
+                if not isinstance(result, ChipFetchResult):
+                    # 防御：第三方源返回了非契约类型
+                    return ChipFetchResult.failed(
+                        f'get_chip_distribution_ex 返回了非 ChipFetchResult: {type(result).__name__}',
+                        fetcher_name,
+                        latency_ms=int((time.time() - attempt_start) * 1000),
+                    )
+                if not result.source:
+                    result.source = fetcher_name
+                if not result.latency_ms:
+                    result.latency_ms = int((time.time() - attempt_start) * 1000)
+                return result
+
+            chip = self._call_fetcher_method(fetcher, 'get_chip_distribution', stock_code)
+            latency_ms = int((time.time() - attempt_start) * 1000)
+            if chip is None:
+                return ChipFetchResult.empty(
+                    '旧接口返回 None（无原因码）', fetcher_name, latency_ms=latency_ms
+                )
+            return ChipFetchResult.ok_of(chip, fetcher_name, latency_ms=latency_ms)
+
+        except Exception as e:
+            error_type, error_reason = summarize_exception(e)
+            return ChipFetchResult.failed(
+                f'{error_type}: {error_reason}',
+                fetcher_name,
+                latency_ms=int((time.time() - attempt_start) * 1000),
+                error_type=error_type,
+            )
 
     def get_stock_name(self, stock_code: str, allow_realtime: bool = True) -> Optional[str]:
         """

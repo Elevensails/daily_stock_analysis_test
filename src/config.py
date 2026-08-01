@@ -1251,6 +1251,18 @@ class Config:
     rag_westock_timeout_seconds: float = 5.0              # westock 子进程超时（秒）
     rag_news_dedup_title_chars: int = 20                  # 新闻去重前缀长度（字符）
     rag_max_prompt_tokens: int = 1500                     # RAG prompt token 预算（字符近似）
+    # --- P1.6 RAG 新闻 CI 化组（docs/p1.6-arch-design.md §3.4）---
+    # neodata 脚本路径不再硬编码在 news.py，改为 config/env 驱动；
+    # 留空时按候选路径探测，探测不到直接跳过 neodata（CI 场景的正常路径）。
+    rag_neodata_script_path: str = ""                     # neodata query.py 绝对路径（留空=自动探测）
+    rag_akshare_news_enabled: bool = True                 # 是否启用 akshare 新闻兜底源
+    rag_akshare_news_timeout_seconds: float = 12.0        # akshare 新闻单次调用超时（秒）
+    rag_akshare_news_max_items: int = 10                  # akshare 新闻最多取几条
+    rag_akshare_news_lookback_days: int = 7               # akshare 新闻回溯天数
+    rag_akshare_news_max_retries: int = 1                 # akshare 新闻失败重试次数
+    rag_news_total_budget_seconds: float = 25.0           # 新闻链路总时间预算（秒）
+    rag_news_merge_sources: bool = False                  # True=多源合并；False=串行短路（默认）
+    rag_news_min_items: int = 3                           # 命中多少条才算"够用"，不足则继续降级
 
     # --- Post-init validation ---------------------------------------------------
     _VALID_AGENT_ARCH = {"single", "multi"}
@@ -2230,6 +2242,63 @@ class Config:
             rag_max_prompt_tokens=parse_env_int(
                 os.getenv('RAG_MAX_PROMPT_TOKENS', _yaml_get(yaml_cfg, ['rag', 'max_prompt_tokens'], 1500)),
                 1500, field_name='RAG_MAX_PROMPT_TOKENS', minimum=1,
+            ),
+            # P1.6 RAG 新闻 CI 化组
+            rag_neodata_script_path=str(
+                os.getenv(
+                    'RAG_NEODATA_SCRIPT_PATH',
+                    _yaml_get(yaml_cfg, ['rag', 'neodata_script_path'], ''),
+                ) or ''
+            ).strip(),
+            rag_akshare_news_enabled=parse_env_bool(
+                os.getenv('RAG_AKSHARE_NEWS_ENABLED'),
+                default=bool(_yaml_get(yaml_cfg, ['rag', 'akshare_news_enabled'], True)),
+            ),
+            rag_akshare_news_timeout_seconds=parse_env_float(
+                os.getenv(
+                    'RAG_AKSHARE_NEWS_TIMEOUT_SECONDS',
+                    _yaml_get(yaml_cfg, ['rag', 'akshare_news_timeout_seconds'], 12.0),
+                ),
+                12.0, field_name='RAG_AKSHARE_NEWS_TIMEOUT_SECONDS', minimum=1.0,
+            ),
+            rag_akshare_news_max_items=parse_env_int(
+                os.getenv(
+                    'RAG_AKSHARE_NEWS_MAX_ITEMS',
+                    _yaml_get(yaml_cfg, ['rag', 'akshare_news_max_items'], 10),
+                ),
+                10, field_name='RAG_AKSHARE_NEWS_MAX_ITEMS', minimum=1,
+            ),
+            rag_akshare_news_lookback_days=parse_env_int(
+                os.getenv(
+                    'RAG_AKSHARE_NEWS_LOOKBACK_DAYS',
+                    _yaml_get(yaml_cfg, ['rag', 'akshare_news_lookback_days'], 7),
+                ),
+                7, field_name='RAG_AKSHARE_NEWS_LOOKBACK_DAYS', minimum=1,
+            ),
+            rag_akshare_news_max_retries=parse_env_int(
+                os.getenv(
+                    'RAG_AKSHARE_NEWS_MAX_RETRIES',
+                    _yaml_get(yaml_cfg, ['rag', 'akshare_news_max_retries'], 1),
+                ),
+                1, field_name='RAG_AKSHARE_NEWS_MAX_RETRIES', minimum=0,
+            ),
+            rag_news_total_budget_seconds=parse_env_float(
+                os.getenv(
+                    'RAG_NEWS_TOTAL_BUDGET_SECONDS',
+                    _yaml_get(yaml_cfg, ['rag', 'news_total_budget_seconds'], 25.0),
+                ),
+                25.0, field_name='RAG_NEWS_TOTAL_BUDGET_SECONDS', minimum=1.0,
+            ),
+            rag_news_merge_sources=parse_env_bool(
+                os.getenv('RAG_NEWS_MERGE_SOURCES'),
+                default=bool(_yaml_get(yaml_cfg, ['rag', 'news_merge_sources'], False)),
+            ),
+            rag_news_min_items=parse_env_int(
+                os.getenv(
+                    'RAG_NEWS_MIN_ITEMS',
+                    _yaml_get(yaml_cfg, ['rag', 'news_min_items'], 3),
+                ),
+                3, field_name='RAG_NEWS_MIN_ITEMS', minimum=1,
             ),
         )
         apply_proxy_settings(cfg)

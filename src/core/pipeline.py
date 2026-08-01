@@ -27,7 +27,11 @@ from src.config import FUNDAMENTAL_STAGE_TIMEOUT_SECONDS_DEFAULT, get_config, Co
 from src.storage import get_db
 from data_provider import DataFetcherManager
 from data_provider.base import is_bse_code, normalize_stock_code
-from data_provider.realtime_types import ChipDistribution
+from data_provider.realtime_types import (
+    ChipDistribution,
+    ChipUnavailableReason,
+    get_chip_diagnostics,
+)
 from src.analyzer import (
     GeminiAnalyzer,
     AnalysisResult,
@@ -470,16 +474,27 @@ class StockAnalysisPipeline:
                 stock_name = f'股票{code}'
 
             # Step 2: 获取筹码分布 - 使用统一入口，带熔断保护
+            # P1.6：改用带原因码的 _ex 入口，把「ETF 本就无筹码」与「接口故障」
+            # 的区分一路带到报告文案与上下文包（docs/p1.6-arch-design.md §3.2）
             chip_data = None
+            chip_reason = ChipUnavailableReason.FETCH_FAILED.value
             try:
-                chip_data = self.fetcher_manager.get_chip_distribution(code)
+                chip_result = self.fetcher_manager.get_chip_distribution_ex(code)
+                chip_data = chip_result.chip
+                chip_reason = chip_result.reason.value
                 if chip_data:
                     logger.info(f"{stock_name}({code}) 筹码分布: 获利比例={chip_data.profit_ratio:.1%}, "
                               f"90%集中度={chip_data.concentration_90:.2%}")
+                elif chip_result.is_not_applicable:
+                    logger.debug(f"{stock_name}({code}) 标的类型无筹码数据，跳过")
                 else:
-                    logger.debug(f"{stock_name}({code}) 筹码分布获取失败或已禁用")
+                    logger.debug(
+                        f"{stock_name}({code}) 筹码分布不可用: "
+                        f"{chip_reason} | {chip_result.detail}"
+                    )
             except Exception as e:
                 logger.warning(f"{stock_name}({code}) 获取筹码分布失败: {e}")
+                chip_reason = ChipUnavailableReason.FETCH_FAILED.value
 
             # If agent mode is explicitly enabled, or specific agent skills are configured, use the Agent analysis pipeline.
             # NOTE: use config.agent_mode (explicit opt-in) instead of
@@ -580,6 +595,7 @@ class StockAnalysisPipeline:
                     portfolio_context=portfolio_context,
                     market_structure_context=market_structure_context,
                     previous_slot_stock_conclusions=previous_slot_stock_conclusions,
+                    chip_reason=chip_reason,
                 )
 
             # Step 4: 多维度情报搜索（最新消息+风险排查+业绩预期）
@@ -677,6 +693,7 @@ class StockAnalysisPipeline:
                 fundamental_context,
                 market_phase_context=market_phase_context_dict,
                 portfolio_context=portfolio_context,
+                chip_reason=chip_reason,
             )
             enhanced_context["market_phase_context"] = market_phase_context_dict
             self._attach_daily_market_context(
@@ -738,6 +755,7 @@ class StockAnalysisPipeline:
                     news_result_count=news_result_count,
                     query_id=query_id,
                     portfolio_context=portfolio_context,
+                    chip_reason=chip_reason,
                 ),
                 report_language=report_language,
                 code=code,
@@ -808,7 +826,7 @@ class StockAnalysisPipeline:
 
             # Step 7.6: chip_structure fallback (Issue #589) and unavailable collapse
             if result:
-                normalize_chip_structure_availability(result, chip_data)
+                normalize_chip_structure_availability(result, chip_data, chip_reason)
 
             # Step 7.7: price_position fallback
             if result:
@@ -916,6 +934,7 @@ class StockAnalysisPipeline:
         fundamental_context: Optional[Dict[str, Any]] = None,
         market_phase_context: Optional[Dict[str, Any]] = None,
         portfolio_context: Optional[Dict[str, Any]] = None,
+        chip_reason: str = ChipUnavailableReason.OK.value,
     ) -> Dict[str, Any]:
         """
         增强分析上下文
@@ -929,6 +948,7 @@ class StockAnalysisPipeline:
             trend_result: 趋势分析结果
             stock_name: 股票名称
             market_phase_context: 已构建的市场阶段上下文，用于标记盘中 partial bar
+            chip_reason: P1.6 筹码原因码，用于 prompt 侧「不适用」与「暂不可用」分流
             
         Returns:
             增强后的上下文
@@ -986,6 +1006,9 @@ class StockAnalysisPipeline:
                 'concentration_70': chip_data.concentration_70,
                 'chip_status': chip_data.get_chip_status(current_price or 0),
             }
+        else:
+            # P1.6：无筹码数据时把原因码带进上下文，供 analyzer 渲染分流文案
+            enhanced['chip_reason'] = chip_reason or ChipUnavailableReason.FETCH_FAILED.value
         
         # 添加趋势分析结果
         if trend_result:
@@ -1394,6 +1417,7 @@ class StockAnalysisPipeline:
         portfolio_context: Optional[Dict[str, Any]] = None,
         market_structure_context: Optional[Dict[str, Any]] = None,
         previous_slot_stock_conclusions: Optional[Dict[str, Any]] = None,
+        chip_reason: str = ChipUnavailableReason.OK.value,
     ) -> Optional[AnalysisResult]:
         """使用 Agent 模式分析单只股票（含上一时段个股连续性注入）。
 
@@ -1534,6 +1558,7 @@ class StockAnalysisPipeline:
                     query_id=query_id,
                     base_context=analysis_context,
                     portfolio_context=portfolio_context,
+                    chip_reason=chip_reason,
                 ),
                 report_language=report_language,
                 code=code,
@@ -1628,7 +1653,7 @@ class StockAnalysisPipeline:
                     )
             # chip_structure fallback (Issue #589), before save_analysis_history
             if result and chip_data is not None:
-                normalize_chip_structure_availability(result, chip_data)
+                normalize_chip_structure_availability(result, chip_data, chip_reason)
 
             # price_position fallback (same as non-agent path Step 7.7)
             if result:
@@ -2953,6 +2978,7 @@ class StockAnalysisPipeline:
         news_result_count: Optional[int],
         query_id: str,
         portfolio_context: Optional[Dict[str, Any]] = None,
+        chip_reason: str = ChipUnavailableReason.OK.value,
     ) -> PipelineAnalysisArtifacts:
         return PipelineAnalysisArtifacts(
             code=code,
@@ -2967,12 +2993,34 @@ class StockAnalysisPipeline:
             fundamental_context=fundamental_context,
             news_context=news_context,
             news_result_count=news_result_count,
-            metadata={
-                "query_id": query_id,
-                "trigger_source": self.query_source,
-            },
+            metadata=self._build_artifacts_metadata(query_id, chip_reason),
             portfolio_context=dict(portfolio_context) if isinstance(portfolio_context, dict) else None,
         )
+
+    def _build_artifacts_metadata(
+        self,
+        query_id: str,
+        chip_reason: str = ChipUnavailableReason.OK.value,
+    ) -> Dict[str, Any]:
+        """构造 artifacts.metadata（P1.6 起额外携带筹码原因码）。
+
+        ``chip_not_supported`` 为历史键，AnalysisContextBuilder 已在消费；
+        这里保持写入以兼容旧逻辑，同时新增 ``chip_reason`` 提供细粒度原因。
+
+        Args:
+            query_id: 本次查询 ID
+            chip_reason: ChipUnavailableReason 的取值字符串
+
+        Returns:
+            metadata 字典
+        """
+        normalized_reason = chip_reason or ChipUnavailableReason.FETCH_FAILED.value
+        return {
+            "query_id": query_id,
+            "trigger_source": self.query_source,
+            "chip_reason": normalized_reason,
+            "chip_not_supported": normalized_reason == ChipUnavailableReason.NOT_APPLICABLE.value,
+        }
 
     def _build_agent_analysis_artifacts(
         self,
@@ -2986,6 +3034,7 @@ class StockAnalysisPipeline:
         query_id: str,
         base_context: Optional[Dict[str, Any]] = None,
         portfolio_context: Optional[Dict[str, Any]] = None,
+        chip_reason: str = ChipUnavailableReason.OK.value,
     ) -> PipelineAnalysisArtifacts:
         context_candidate = base_context
         if not isinstance(context_candidate, dict):
@@ -3017,10 +3066,7 @@ class StockAnalysisPipeline:
             fundamental_context=fundamental_context,
             news_context=initial_context.get("news_context"),
             news_result_count=None,
-            metadata={
-                "query_id": query_id,
-                "trigger_source": self.query_source,
-            },
+            metadata=self._build_artifacts_metadata(query_id, chip_reason),
             portfolio_context=dict(portfolio_context) if isinstance(portfolio_context, dict) else None,
         )
 
@@ -3295,6 +3341,10 @@ class StockAnalysisPipeline:
         logger.info(f"股票列表: {', '.join(stock_codes)}")
         logger.info(f"并发数: {self.max_workers}, 模式: {'仅获取数据' if dry_run else '完整分析'}")
 
+        # P1.6：WebUI 为长驻进程，必须每轮 run 开始时清零筹码诊断计数，
+        # 否则 [筹码汇总] 会跨 run 累加，失去"这一轮到底几只失败"的判读价值。
+        get_chip_diagnostics().reset()
+
         # 冻结本轮运行的统一参考时间，避免跨市场收盘边界时同批股票使用不同目标交易日。
         resume_reference_time = current_time or datetime.now(timezone.utc)
         
@@ -3419,6 +3469,14 @@ class StockAnalysisPipeline:
         
         logger.info("===== 分析完成 =====")
         logger.info(f"成功: {success_count}, 失败: {fail_count}, 耗时: {elapsed_time:.2f} 秒")
+
+        # P1.6：一行可 grep 的筹码链路汇总，用于快速判断"是不是又全挂了"
+        # 格式：[筹码汇总] 尝试 N 只 / 成功 N / 不适用 N / 失败 N / 空数据 N
+        try:
+            logger.info(get_chip_diagnostics().summary_line())
+        except Exception as exc:  # 诊断行绝不允许影响主流程
+            logger.debug(f"[筹码汇总] 输出失败（忽略）: {exc}")
+
         
         # 保存报告到本地文件（无论是否推送通知都保存）
         if results and not dry_run:

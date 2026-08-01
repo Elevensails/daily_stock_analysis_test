@@ -32,7 +32,11 @@ from tenacity import (
 )
 
 from .base import BaseFetcher, DataFetchError, RateLimitError, STANDARD_COLUMNS,is_bse_code, is_st_stock, is_kc_cy_stock, normalize_stock_code, _is_hk_market
-from .realtime_types import UnifiedRealtimeQuote, ChipDistribution
+from .realtime_types import (
+    UnifiedRealtimeQuote, ChipDistribution,
+    # P1.6 筹码原因码契约
+    ChipFetchResult, ChipUnavailableReason,
+)
 from src.config import get_config
 import os
 from zoneinfo import ZoneInfo
@@ -1150,38 +1154,65 @@ class TushareFetcher(BaseFetcher):
     
     def get_chip_distribution(self, stock_code: str) -> Optional[ChipDistribution]:
         """
-        获取筹码分布数据
-        
-        数据来源：ts.pro_api().cyq_chips()
-        包含：获利比例、平均成本、筹码集中度
-        
-        注意：ETF/指数没有筹码分布数据，会直接返回 None；港股不支持，直接返回 None。
-        5000积分以下每天访问15次,每小时访问5次
-        
+        获取筹码分布数据（向后兼容 shim）
+
+        P1.6 起真实逻辑迁移至 :meth:`get_chip_distribution_ex`，
+        本方法仅做「丢弃原因码」的降级适配，保证既有调用方零改动。
+
         Args:
             stock_code: 股票代码
-            
+
         Returns:
             ChipDistribution 对象（最新交易日的数据），获取失败返回 None
-
         """
+        return self.get_chip_distribution_ex(stock_code).chip
+
+    def get_chip_distribution_ex(self, stock_code: str) -> ChipFetchResult:
+        """
+        获取筹码分布数据（带原因码）
+
+        数据来源：ts.pro_api().cyq_chips()
+        包含：获利比例、平均成本、筹码集中度
+
+        注意：ETF/指数/港股/美股没有筹码分布数据，返回 NOT_APPLICABLE；
+        未配置 TUSHARE_TOKEN 时返回 NO_CREDENTIAL（静默跳过，不计失败率、不熔断）。
+        5000 积分以下每天访问 15 次，每小时访问 5 次。
+
+        Args:
+            stock_code: 股票代码
+
+        Returns:
+            ChipFetchResult，永不返回 None、永不抛异常
+        """
+        source = 'tushare'
+
+        # 无凭证：Tushare 本就不可用，属于"未配置"而非"故障"，绝不能计入失败率
+        if self._api is None:
+            logger.debug(f"[Tushare] Token 未配置，跳过 {stock_code} 筹码分布")
+            return ChipFetchResult.no_credential(source, 'TUSHARE_TOKEN 未配置，Tushare API 不可用')
+
         if _is_us_code(stock_code):
             logger.warning(f"[Tushare] TushareFetcher 不支持美股 {stock_code} 的筹码分布")
-            return None
-        
+            return ChipFetchResult.na('美股无筹码分布数据', source)
+
         if _is_etf_code(stock_code):
             logger.warning(f"[Tushare] TushareFetcher 不支持 ETF {stock_code} 的筹码分布")
-            return None
+            return ChipFetchResult.na('ETF/指数无筹码分布数据', source)
 
         if _is_hk_market(stock_code):
             logger.warning(f"[Tushare] TushareFetcher 不支持港股 {stock_code} 的筹码分布")
-            return None
-        
+            return ChipFetchResult.na('港股无筹码分布数据', source)
+
+        api_start = time.time()
         try:
             # 19点之后才有当天数据
-            start_date = self.get_trade_time(early_time='00:00', late_time='19:00') 
+            start_date = self.get_trade_time(early_time='00:00', late_time='19:00')
             if not start_date:
-                return None
+                return ChipFetchResult.empty(
+                    '当前时点无可用交易日（19:00 前当日筹码未生成）',
+                    source,
+                    latency_ms=int((time.time() - api_start) * 1000),
+                )
 
             ts_code = self._convert_stock_code(stock_code)
 
@@ -1191,39 +1222,57 @@ class TushareFetcher(BaseFetcher):
                 start_date=start_date,
                 end_date=start_date,
             )
-            if df is not None and not df.empty:
-                daily_df = self._call_api_with_rate_limit(
-                    "daily",
-                    ts_code=ts_code,
-                    start_date=start_date,
-                    end_date=start_date,
+            if df is None or df.empty:
+                return ChipFetchResult.empty(
+                    'cyq_chips 返回空数据',
+                    source,
+                    latency_ms=int((time.time() - api_start) * 1000),
                 )
-                if daily_df is None or daily_df.empty:
-                    return None
-                current_price = daily_df.iloc[0]['close']
-                metrics = self.compute_cyq_metrics(df, current_price)
 
-                chip = ChipDistribution(
-                    code=stock_code,
-                    date=datetime.strptime(start_date, '%Y%m%d').strftime('%Y-%m-%d'),
-                    profit_ratio=metrics['获利比例'],
-                    avg_cost=metrics['平均成本'],
-                    cost_90_low=metrics['90成本-低'],
-                    cost_90_high=metrics['90成本-高'],
-                    concentration_90=metrics['90集中度'],
-                    cost_70_low=metrics['70成本-低'],
-                    cost_70_high=metrics['70成本-高'],
-                    concentration_70=metrics['70集中度'],
+            daily_df = self._call_api_with_rate_limit(
+                "daily",
+                ts_code=ts_code,
+                start_date=start_date,
+                end_date=start_date,
+            )
+            if daily_df is None or daily_df.empty:
+                return ChipFetchResult.empty(
+                    'daily 行情返回空数据，无法计算筹码指标',
+                    source,
+                    latency_ms=int((time.time() - api_start) * 1000),
                 )
-                
-                logger.info(f"[筹码分布] {stock_code} 日期={chip.date}: 获利比例={chip.profit_ratio:.1%}, "
-                        f"平均成本={chip.avg_cost}, 90%集中度={chip.concentration_90:.2%}, "
-                        f"70%集中度={chip.concentration_70:.2%}")
-                return chip
+
+            current_price = daily_df.iloc[0]['close']
+            metrics = self.compute_cyq_metrics(df, current_price)
+
+            chip = ChipDistribution(
+                code=stock_code,
+                date=datetime.strptime(start_date, '%Y%m%d').strftime('%Y-%m-%d'),
+                profit_ratio=metrics['获利比例'],
+                avg_cost=metrics['平均成本'],
+                cost_90_low=metrics['90成本-低'],
+                cost_90_high=metrics['90成本-高'],
+                concentration_90=metrics['90集中度'],
+                cost_70_low=metrics['70成本-低'],
+                cost_70_high=metrics['70成本-高'],
+                concentration_70=metrics['70集中度'],
+            )
+
+            logger.info(f"[筹码分布] {stock_code} 日期={chip.date}: 获利比例={chip.profit_ratio:.1%}, "
+                    f"平均成本={chip.avg_cost}, 90%集中度={chip.concentration_90:.2%}, "
+                    f"70%集中度={chip.concentration_70:.2%}")
+            return ChipFetchResult.ok_of(
+                chip, source, latency_ms=int((time.time() - api_start) * 1000)
+            )
 
         except Exception as e:
             logger.warning(f"[Tushare] 获取筹码分布失败 {stock_code}: {e}")
-            return None
+            return ChipFetchResult.failed(
+                f'{type(e).__name__}: {e}',
+                source,
+                latency_ms=int((time.time() - api_start) * 1000),
+                error_type=type(e).__name__,
+            )
 
     def compute_cyq_metrics(self, df: pd.DataFrame, current_price: float) -> dict:
         """

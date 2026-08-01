@@ -206,3 +206,78 @@ class TestRagPromptInjection:
         if section:
             prompt = prompt.replace("## 📈", section + "\n\n## 📈")
         assert "## 🔍 外部数据检索" not in prompt
+
+
+class TestRagNewsSourceTrace:
+    """P1.6 T05：新闻检索 SourceTrace.actual_source 精确化集成测试（离线）。
+
+    验证：retrieve_news_ex 在命中 akshare_em 时，hit_source 精确为 'akshare_em'，
+    且 retriever 把该 hit_source 直接写入 SourceTrace.actual_source，
+    不再靠「news_text 里有没有 search_service 子串」猜测。
+    """
+
+    def _fake_records(self):
+        from datetime import datetime
+        today = datetime.now().strftime("%Y-%m-%d")
+        # 两条记录分别用空格分隔与 T 分隔的「发布时间」，覆盖 E2 边界
+        return [
+            {"新闻标题": "招行发布业绩预告", "新闻内容": "净利润增长", "发布时间": f"{today} 10:00:00"},
+            {"新闻标题": "招行分红方案", "新闻内容": "每股派息", "发布时间": f"{today}T15:30:00"},
+        ]
+
+    def test_retrieve_news_ex_hit_source_akshare_precise(self, monkeypatch):
+        """命中 akshare_em 时 hit_source 精确为 akshare_em（而非被猜成 neodata）。"""
+        from src.rag.news import retrieve_news_ex, SOURCE_AKSHARE_EM
+
+        monkeypatch.setattr("src.rag.news.is_circuit_open", lambda: False)
+        monkeypatch.setattr(
+            "src.rag.news.fetch_stock_news",
+            lambda symbol, timeout=12.0: self._fake_records(),
+        )
+
+        result = retrieve_news_ex("600036", "招商银行", config=None)
+        assert result.hit_source == SOURCE_AKSHARE_EM
+        assert result.success is True
+        assert "招行发布业绩预告" in result.block
+        assert SOURCE_AKSHARE_EM in result.attempted
+        assert result.item_count >= 1
+
+    def test_retrieve_news_ex_e2_date_parse_T_separator(self, monkeypatch):
+        """E2 边界：「发布时间」用 T 分隔时仍能正确解析并保留条目。"""
+        from src.rag.news import retrieve_news_ex
+
+        monkeypatch.setattr("src.rag.news.is_circuit_open", lambda: False)
+        monkeypatch.setattr(
+            "src.rag.news.fetch_stock_news",
+            lambda symbol, timeout=12.0: self._fake_records(),
+        )
+
+        result = retrieve_news_ex("600036", "招商银行", config=None)
+        # 两条记录（空格 / T 分隔）都应进入 block
+        assert "招行发布业绩预告" in result.block
+        assert "招行分红方案" in result.block
+
+    def test_retriever_news_trace_uses_precise_hit_source(self, monkeypatch):
+        """retriever 把 retrieve_news_ex 的 hit_source 直接写入 SourceTrace。"""
+        from src.rag.news import NewsRetrievalResult, SOURCE_AKSHARE_EM
+
+        fake_result = NewsRetrievalResult(
+            block="### 近期动态\n- 招行新闻",
+            hit_source=SOURCE_AKSHARE_EM,
+            elapsed_ms=1.2,
+        )
+        monkeypatch.setattr(
+            "src.rag.news.retrieve_news_ex",
+            lambda *args, **kwargs: fake_result,
+        )
+        # 避免 financial / technical 子检索在离线环境真正触网
+        monkeypatch.setattr("src.rag.financial.retrieve_financial", lambda *a, **k: "")
+        monkeypatch.setattr("src.rag.technical.retrieve_technical", lambda *a, **k: "")
+
+        from src.rag.retriever import retrieve_financial_context
+        ctx = retrieve_financial_context("600036", "招商银行", config=None)
+
+        news_traces = [t for t in ctx.source_trace if t.dimension == "news"]
+        assert news_traces, "应当产出 news 维度的 SourceTrace"
+        assert news_traces[0].actual_source == SOURCE_AKSHARE_EM
+        assert news_traces[0].success is True

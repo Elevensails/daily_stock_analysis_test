@@ -101,19 +101,23 @@ def retrieve_financial_context(
             success=False,
         ))
 
-    # ── 3. 新闻检索 ──
+    # ── 3. 新闻检索（P1.6：基于 retrieve_news_ex 的精确 hit_source）──
+    # 旧实现靠「news_text 里有没有 search_service 子串」猜数据源，会在命中
+    # akshare_em 时误报为 neodata。改为直接读取 NewsRetrievalResult.hit_source。
     t0 = time.monotonic()
     try:
-        from src.rag.news import retrieve_news
-        news_text = retrieve_news(code, stock_name, search_service=search_service, config=config)
-        rag_context.news_block = news_text
+        from src.rag.news import retrieve_news_ex
+        news_result = retrieve_news_ex(
+            code, stock_name, search_service=search_service, config=config
+        )
+        rag_context.news_block = news_result.block
         source_traces.append(SourceTrace(
             dimension="news",
             primary_source="neodata",
-            actual_source="neodata" if news_text and "search_service" not in news_text else
-                         ("search_service" if news_text else "none"),
-            elapsed_ms=(time.monotonic() - t0) * 1000,
-            success=bool(news_text),
+            # 精确来源：neodata / akshare_em / search_service / none，不再字符串猜测
+            actual_source=news_result.hit_source,
+            elapsed_ms=news_result.elapsed_ms,
+            success=news_result.success,
         ))
     except Exception as exc:
         logger.warning("[RAG] 新闻检索失败（降级，不阻塞）: %s", exc)

@@ -322,6 +322,35 @@ _CHIP_UNAVAILABLE_BY_LANGUAGE = {
     "ko": "매물대가 비활성화되었거나 데이터 소스를 일시적으로 사용할 수 없어 매물대 신호를 반영하지 않았습니다.",
 }
 
+# P1.6：按原因码分流文案（docs/p1.6-arch-design.md §3.3）
+# 「ETF/港股/美股本就没有筹码」不是故障，不应让用户以为系统坏了；
+# 「数据源真的挂了」则必须明确说"暂不可用"，两者措辞必须区分。
+_CHIP_NOT_APPLICABLE_BY_LANGUAGE = {
+    "zh": "该标的类型（ETF/指数/港股/美股）无筹码分布数据，本项不适用。",
+    "en": "Chip distribution does not apply to this instrument type (ETF/index/HK/US equity).",
+    "ko": "해당 종목 유형(ETF/지수/홍콩/미국 주식)에는 매물대 데이터가 없어 본 항목은 해당되지 않습니다.",
+}
+
+_CHIP_FETCH_FAILED_BY_LANGUAGE = {
+    "zh": "筹码分布数据源获取失败，本次分析未纳入筹码判断。",
+    "en": "Chip distribution fetch failed; chip signals were not used in this analysis.",
+    "ko": "매물대 데이터 조회에 실패하여 이번 분석에서는 매물대 신호를 반영하지 않았습니다.",
+}
+
+_CHIP_DISABLED_BY_LANGUAGE = {
+    "zh": "筹码分布功能已关闭，未纳入筹码判断。",
+    "en": "Chip distribution is disabled; chip signals were not used.",
+    "ko": "매물대 기능이 비활성화되어 매물대 신호를 반영하지 않았습니다.",
+}
+
+# reason -> 文案表。未列出的原因码（ok / empty / no_credential / circuit_open）
+# 一律回落到通用的 _CHIP_UNAVAILABLE_BY_LANGUAGE，保证零破坏。
+_CHIP_REASON_TEXT_MAP = {
+    "not_applicable": _CHIP_NOT_APPLICABLE_BY_LANGUAGE,
+    "fetch_failed": _CHIP_FETCH_FAILED_BY_LANGUAGE,
+    "disabled": _CHIP_DISABLED_BY_LANGUAGE,
+}
+
 _CHIP_PLACEHOLDER_EXACT = {
     "",
     "n/a",
@@ -847,9 +876,26 @@ def get_no_data_text(language: Optional[str]) -> str:
     return _NO_DATA_BY_LANGUAGE[normalize_report_language(language)]
 
 
-def get_chip_unavailable_text(language: Optional[str]) -> str:
-    """Return the localized one-line chip distribution fallback text."""
-    return _CHIP_UNAVAILABLE_BY_LANGUAGE[normalize_report_language(language)]
+def get_chip_unavailable_text(language: Optional[str], reason: Optional[str] = None) -> str:
+    """Return the localized one-line chip distribution fallback text.
+
+    P1.6 起支持按原因码分流：``not_applicable`` 渲染"本项不适用"，
+    ``fetch_failed`` 渲染"获取失败"，``disabled`` 渲染"功能已关闭"，
+    其余（含 reason=None 的旧调用）保持历史通用文案，实现零破坏兼容。
+
+    Args:
+        language: 报告语言（zh / en / ko）
+        reason: ChipUnavailableReason 的取值字符串，可为 None
+
+    Returns:
+        本地化的一行降级说明文本
+    """
+    lang = normalize_report_language(language)
+    reason_key = str(reason or "").strip().lower()
+    text_map = _CHIP_REASON_TEXT_MAP.get(reason_key)
+    if text_map is not None:
+        return text_map[lang]
+    return _CHIP_UNAVAILABLE_BY_LANGUAGE[lang]
 
 
 def _normalize_lookup_key(value: Any) -> str:

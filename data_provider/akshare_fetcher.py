@@ -48,7 +48,9 @@ from .base import BaseFetcher, DataFetchError, RateLimitError, STANDARD_COLUMNS,
 from .realtime_types import (
     UnifiedRealtimeQuote, ChipDistribution, RealtimeSource,
     get_realtime_circuit_breaker, get_chip_circuit_breaker,
-    safe_float, safe_int  # 使用统一的类型转换函数
+    safe_float, safe_int,  # 使用统一的类型转换函数
+    # P1.6 筹码原因码契约
+    ChipFetchResult, ChipUnavailableReason, ChipFetchPolicy,
 )
 from .us_index_mapping import is_us_index_code, is_us_stock_code
 
@@ -1572,61 +1574,165 @@ class AkshareFetcher(BaseFetcher):
             circuit_breaker.record_failure(sina_key, str(e))
             return None
     
+    def _get_chip_policy(self) -> ChipFetchPolicy:
+        """惰性构造筹码抓取策略（进程内缓存，避免每只票重复读 config）。"""
+        policy = getattr(self, '_chip_policy_cache', None)
+        if policy is None:
+            try:
+                policy = ChipFetchPolicy.from_config(get_config())
+            except Exception as exc:  # config 读取异常不应阻断筹码抓取
+                logger.debug(f"[筹码] 读取 ChipFetchPolicy 失败，使用默认策略: {exc}")
+                policy = ChipFetchPolicy()
+            self._chip_policy_cache = policy
+        return policy
+
+    def _apply_chip_anti_crawl_headers(self, policy: ChipFetchPolicy) -> None:
+        """按策略注入反爬请求头（分叉 B 的落地点）。
+
+        akshare 内部对东财接口使用 ``requests.get``，这里通过修改
+        ``requests.utils.default_headers`` 影响不到已建连接，因此改为
+        设置进程级默认 Session headers；策略关闭时完全不做任何事，
+        保证分叉 A（默认）零行为变化。
+
+        Args:
+            policy: 当前筹码抓取策略
+        """
+        if not policy.force_user_agent:
+            return
+        try:
+            import requests as _requests
+            session = getattr(_requests.sessions.Session, '_dsa_chip_headers', None)
+            headers = {'User-Agent': random.choice(USER_AGENTS)}
+            if policy.referer:
+                headers['Referer'] = policy.referer
+            # 直接更新 requests 的默认 headers，作用于后续新建 Session
+            _requests.utils.default_headers().update(headers)
+            if session is None:
+                setattr(_requests.sessions.Session, '_dsa_chip_headers', True)
+            logger.debug(f"[筹码] 已注入反爬请求头: {list(headers.keys())}")
+        except Exception as exc:
+            logger.debug(f"[筹码] 注入反爬请求头失败（忽略）: {exc}")
+
     def get_chip_distribution(self, stock_code: str) -> Optional[ChipDistribution]:
         """
-        获取筹码分布数据
-        
-        数据来源：ak.stock_cyq_em()
-        包含：获利比例、平均成本、筹码集中度
-        
-        注意：ETF/指数没有筹码分布数据，会直接返回 None
-        
+        获取筹码分布数据（向后兼容 shim）
+
+        P1.6 起真实逻辑迁移至 :meth:`get_chip_distribution_ex`，
+        本方法仅做「丢弃原因码」的降级适配，保证既有调用方零改动。
+
         Args:
             stock_code: 股票代码
-            
+
         Returns:
             ChipDistribution 对象（最新一天的数据），获取失败返回 None
         """
-        import akshare as ak
+        return self.get_chip_distribution_ex(stock_code).chip
+
+    def get_chip_distribution_ex(self, stock_code: str) -> ChipFetchResult:
+        """
+        获取筹码分布数据（带原因码）
+
+        数据来源：ak.stock_cyq_em()
+        包含：获利比例、平均成本、筹码集中度
+
+        与旧接口的差异：不再用 None 表达全部失败语义，而是通过
+        ``ChipFetchResult.reason`` 区分「标的不适用」与「真故障」，
+        供上层做熔断分流与文案分流（见 docs/p1.6-arch-design.md §3.2）。
+
+        Args:
+            stock_code: 股票代码
+
+        Returns:
+            ChipFetchResult，永不返回 None、永不抛异常
+        """
+        source = 'akshare'
+        policy = self._get_chip_policy()
+
+        # 分叉 C：确认接口已死时整源关闭，不再浪费一次网络往返
+        if policy.disable_akshare_chip:
+            logger.debug(f"[API跳过] {stock_code} akshare 筹码接口已按策略关闭")
+            return ChipFetchResult.disabled(source, 'ChipFetchPolicy.disable_akshare_chip=True')
 
         # 美股没有筹码分布数据（Akshare 不支持）
         if _is_us_code(stock_code):
             logger.debug(f"[API跳过] {stock_code} 是美股，无筹码分布数据")
-            return None
+            return ChipFetchResult.na('美股无筹码分布数据', source)
 
         # 港股没有筹码分布数据（stock_cyq_em 是 A 股专属接口）
         if _is_hk_code(stock_code):
             logger.debug(f"[API跳过] {stock_code} 是港股，无筹码分布数据")
-            return None
+            return ChipFetchResult.na('港股无筹码分布数据', source)
 
         # ETF/指数没有筹码分布数据
         if _is_etf_code(stock_code):
             logger.debug(f"[API跳过] {stock_code} 是 ETF/指数，无筹码分布数据")
-            return None
-        
+            return ChipFetchResult.na('ETF/指数无筹码分布数据', source)
+
+        import time as _time
+        total_start = _time.time()
+        attempts = max(1, policy.max_retries + 1)
+        last_result: ChipFetchResult = ChipFetchResult.failed('未执行任何尝试', source)
+
+        for attempt in range(attempts):
+            last_result = self._fetch_chip_once(stock_code, policy, source)
+            if last_result.ok or last_result.reason is ChipUnavailableReason.EMPTY:
+                # 空数据是"接口通但没内容"，重试无意义，直接短路
+                break
+            if attempt < attempts - 1:
+                backoff = policy.retry_backoff_seconds * (2 ** attempt)
+                logger.info(
+                    f"[筹码重试] {stock_code} 第 {attempt + 1}/{attempts} 次失败，"
+                    f"{backoff:.1f}s 后重试: {last_result.detail}"
+                )
+                time.sleep(backoff)
+
+        last_result.latency_ms = int((_time.time() - total_start) * 1000)
+        return last_result
+
+    def _fetch_chip_once(
+        self,
+        stock_code: str,
+        policy: ChipFetchPolicy,
+        source: str,
+    ) -> ChipFetchResult:
+        """执行单次筹码抓取（不含重试）。
+
+        Args:
+            stock_code: 股票代码
+            policy: 筹码抓取策略
+            source: 数据源标识，用于回填 ChipFetchResult.source
+
+        Returns:
+            ChipFetchResult（ok / empty / failed 三选一）
+        """
+        import time as _time
+        import akshare as ak
+
+        api_start = _time.time()
         try:
             # 防封禁策略
             self._set_random_user_agent()
+            self._apply_chip_anti_crawl_headers(policy)
             self._enforce_rate_limit()
-            
+
             logger.info(f"[API调用] ak.stock_cyq_em(symbol={stock_code}) 获取筹码分布...")
-            import time as _time
-            api_start = _time.time()
-            
             df = ak.stock_cyq_em(symbol=stock_code)
-            
             api_elapsed = _time.time() - api_start
-            
-            if df.empty:
+
+            if df is None or df.empty:
                 logger.warning(f"[API返回] ak.stock_cyq_em 返回空数据, 耗时 {api_elapsed:.2f}s")
-                return None
-            
+                return ChipFetchResult.empty(
+                    'ak.stock_cyq_em 返回空 DataFrame',
+                    source,
+                    latency_ms=int(api_elapsed * 1000),
+                )
+
             logger.info(f"[API返回] ak.stock_cyq_em 成功: 返回 {len(df)} 天数据, 耗时 {api_elapsed:.2f}s")
             logger.debug(f"[API返回] 筹码数据列名: {list(df.columns)}")
-            
+
             # 取最新一天的数据
             latest = df.iloc[-1]
-            
+
             # 使用 realtime_types.py 中的统一转换函数
             chip = ChipDistribution(
                 code=stock_code,
@@ -1640,15 +1746,22 @@ class AkshareFetcher(BaseFetcher):
                 cost_70_high=safe_float(latest.get('70成本-高')),
                 concentration_70=safe_float(latest.get('70集中度')),
             )
-            
+
             logger.info(f"[筹码分布] {stock_code} 日期={chip.date}: 获利比例={chip.profit_ratio:.1%}, "
                        f"平均成本={chip.avg_cost}, 90%集中度={chip.concentration_90:.2%}, "
                        f"70%集中度={chip.concentration_70:.2%}")
-            return chip
-            
+            return ChipFetchResult.ok_of(chip, source, latency_ms=int(api_elapsed * 1000))
+
         except Exception as e:
+            api_elapsed = _time.time() - api_start
             logger.error(f"[API错误] 获取 {stock_code} 筹码分布失败: {e}")
-            return None
+            return ChipFetchResult.failed(
+                f'{type(e).__name__}: {e}',
+                source,
+                latency_ms=int(api_elapsed * 1000),
+                error_type=type(e).__name__,
+            )
+
     
     def get_enhanced_data(self, stock_code: str, days: int = 60) -> Dict[str, Any]:
         """

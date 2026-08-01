@@ -87,6 +87,28 @@ rag:
   # RAG prompt section 最大字符数（中文近似 token 数）。
   max_prompt_tokens: 1500
 
+  # --- P1.6 新闻检索 CI 化（docs/p1.6-arch-design.md §3.4）---
+  # neodata query.py 的绝对路径。留空则按候选路径自动探测；
+  # CI 环境探测不到会直接跳过 neodata 并降级到 akshare，这是正常路径而非故障。
+  neodata_script_path: ""
+  # 是否启用 akshare stock_news_em 作为新闻兜底源（CI 首选可用源）。
+  akshare_news_enabled: true
+  # akshare 新闻单次调用超时（秒）。ak.stock_news_em 本身无 timeout 参数，
+  # 由调用侧用线程池 future.result(timeout=) 强制截断。
+  akshare_news_timeout_seconds: 12.0
+  # akshare 新闻最多保留条数。
+  akshare_news_max_items: 10
+  # akshare 新闻回溯天数（超出则丢弃）。
+  akshare_news_lookback_days: 7
+  # akshare 新闻失败重试次数（0 = 不重试）。
+  akshare_news_max_retries: 1
+  # 新闻链路总时间预算（秒）。超预算后不再尝试后续数据源。
+  news_total_budget_seconds: 25.0
+  # true = 多源结果合并；false = 串行短路（默认，命中即停）。
+  news_merge_sources: false
+  # 命中多少条新闻才算"够用"；不足则继续尝试下一个数据源。
+  news_min_items: 3
+
 # ---------------------------------------------------------------------
 # profiles：P2 预留结构（仅解析、不切换）
 # ---------------------------------------------------------------------

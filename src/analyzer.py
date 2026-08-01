@@ -894,25 +894,48 @@ def _has_meaningful_chip_data(chip_data: Any) -> bool:
     )
 
 
-def _mark_chip_structure_unavailable(result: "AnalysisResult", language: str) -> None:
+def _mark_chip_structure_unavailable(
+    result: "AnalysisResult",
+    language: str,
+    chip_reason: Optional[str] = None,
+) -> None:
+    """Collapse chip structure to a single localized fallback line.
+
+    Args:
+        result: 分析结果对象
+        language: 报告语言
+        chip_reason: P1.6 筹码原因码取值字符串，None 时沿用历史通用文案
+    """
     if not result or not isinstance(result.dashboard, dict):
         return
     data_perspective = result.dashboard.get("data_perspective")
     if not isinstance(data_perspective, dict):
         return
     data_perspective["chip_structure"] = {}
-    data_perspective["chip_unavailable_reason"] = get_chip_unavailable_text(language)
+    data_perspective["chip_unavailable_reason"] = get_chip_unavailable_text(
+        language, chip_reason
+    )
 
 
-def normalize_chip_structure_availability(result: "AnalysisResult", chip_data: Any) -> None:
-    """Fill valid chip metrics or collapse placeholder-only chip fields to one fallback line."""
+def normalize_chip_structure_availability(
+    result: "AnalysisResult",
+    chip_data: Any,
+    chip_reason: Optional[str] = None,
+) -> None:
+    """Fill valid chip metrics or collapse placeholder-only chip fields to one fallback line.
+
+    Args:
+        result: 分析结果对象
+        chip_data: 筹码分布数据（可空）
+        chip_reason: P1.6 筹码原因码取值字符串，用于"不适用"与"暂不可用"文案分流
+    """
     if not result:
         return
     language = getattr(result, "report_language", "zh")
     if _has_meaningful_chip_data(chip_data):
         fill_chip_structure_if_needed(result, chip_data)
         return
-    _mark_chip_structure_unavailable(result, language)
+    _mark_chip_structure_unavailable(result, language, chip_reason)
 
 
 def fill_chip_structure_if_needed(result: "AnalysisResult", chip_data: Any) -> None:
@@ -3616,7 +3639,9 @@ class GeminiAnalyzer:
                 result.market_snapshot = self._build_market_snapshot(context)
                 result.model_used = model_used
                 result.report_language = report_language
-                normalize_chip_structure_availability(result, context.get("chip"))
+                normalize_chip_structure_availability(
+                    result, context.get("chip"), context.get("chip_reason")
+                )
 
                 # 内容完整性校验（可选）
                 if not config.report_integrity_enabled:
@@ -3972,7 +3997,9 @@ class GeminiAnalyzer:
 | 筹码状态 | {chip.get('chip_status', unknown_text)} | |
 """
         else:
-            chip_unavailable_text = get_chip_unavailable_text(report_language)
+            # P1.6：按原因码分流提示语，避免把「ETF 本就无筹码」写成「数据源故障」
+            chip_reason = context.get('chip_reason')
+            chip_unavailable_text = get_chip_unavailable_text(report_language, chip_reason)
             chip_instruction = (
                 "Do not fabricate profit ratio, average cost, or concentration. Mention chip data "
                 "unavailability only once in the report; do not repeat per-field no-data text in `chip_structure`."
