@@ -99,7 +99,8 @@ class TestChipPolicyFromConfig:
         defaults = {f.name: f.default for f in Config.__dataclass_fields__.values()}
         assert defaults["chip_force_user_agent"] is True
         assert defaults["chip_referer"] == "https://quote.eastmoney.com"
-        assert defaults["chip_max_retries"] == 2
+        # P1.6 收尾：默认关闭重试，避免重试放大请求量刷爆 CI 出口 IP。
+        assert defaults["chip_max_retries"] == 0
         assert defaults["chip_disable_akshare"] is False
 
     def test_from_config_reads_new_fields(self):
@@ -145,7 +146,8 @@ class TestChipPolicyFromConfig:
         policy = ChipFetchPolicy.from_config(cfg)
 
         assert policy.force_user_agent is True
-        assert policy.max_retries >= 1
+        # P1.6 收尾：默认不重试（0），UA/Referer 注入保留。
+        assert policy.max_retries == 0
         assert policy.referer.startswith("http")
 
     def test_env_override_wins_over_yaml(self, monkeypatch):
@@ -429,7 +431,7 @@ class TestProbeScriptAntiCrawlDefaults:
         probe = self._load_probe()
         assert probe.DEFAULT_CHIP_FORCE_USER_AGENT is True
         assert probe.DEFAULT_CHIP_REFERER == "https://quote.eastmoney.com"
-        assert probe.DEFAULT_CHIP_MAX_RETRIES == 2
+        assert probe.DEFAULT_CHIP_MAX_RETRIES == 0
 
         from src.config import Config
 
@@ -439,7 +441,10 @@ class TestProbeScriptAntiCrawlDefaults:
         assert probe.DEFAULT_CHIP_MAX_RETRIES == defaults["chip_max_retries"]
 
     def test_probe_chip_retries_and_reports_attempts(self):
-        """probe 侧同样要重试，并把 attempts 写进产物供复盘。"""
+        """retry loop 本身仍要能工作（显式开启时），并把 attempts 写进产物供复盘。
+
+        P1.6 收尾后默认 max_retries=0，故此处显式传 2 以保留重试逻辑的覆盖。
+        """
         probe = self._load_probe()
         calls = {"n": 0}
 
@@ -450,12 +455,30 @@ class TestProbeScriptAntiCrawlDefaults:
                     raise ConnectionError("RemoteDisconnected")
                 return [{"日期": "2026-02-27"}]
 
-        res = probe.probe_chip_one("600036", akshare=_Flaky(), retry_backoff=0.0)
+        res = probe.probe_chip_one(
+            "600036", akshare=_Flaky(), retry_backoff=0.0, max_retries=2
+        )
 
         assert res["status"] == "ok"
         assert res["attempts"] == 3
         assert res["anti_crawl"]["force_user_agent"] is True
         assert res["anti_crawl"]["max_retries"] == 2
+
+    def test_probe_chip_default_does_not_retry(self):
+        """P1.6 收尾护栏：默认 max_retries=0 时只请求 1 次，不刷爆 CI 出口 IP。"""
+        probe = self._load_probe()
+        calls = {"n": 0}
+
+        class _AlwaysFails:
+            def stock_cyq_em(self, symbol=None, **_kw):
+                calls["n"] += 1
+                raise ConnectionError("RemoteDisconnected")
+
+        res = probe.probe_chip_one("600036", akshare=_AlwaysFails(), retry_backoff=0.0)
+
+        assert calls["n"] == 1, "默认配置下不得重试"
+        assert res["attempts"] == 1
+        assert res["status"] != "ok"
 
     def test_probe_chip_patch_restores_requests(self):
         """probe 的补丁同样必须还原，不能影响后续 raw 探测。"""
