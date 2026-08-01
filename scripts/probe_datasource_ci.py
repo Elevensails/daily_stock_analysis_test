@@ -33,6 +33,7 @@ P1.6 — 数据源 CI 实证探测脚本（CI canary）
 
 import argparse
 import concurrent.futures
+import contextlib
 import datetime
 import json
 import logging
@@ -69,6 +70,23 @@ NEWS_PARAMS = {"notice_type": "1", "page_size": "1", "page_index": "1"}
 DEFAULT_CHIP_TIMEOUT = 10.0
 DEFAULT_NEWS_TIMEOUT = 12.0
 DEFAULT_RAW_TIMEOUT = 10.0
+
+# ── 反爬策略默认值（分叉 B）──
+# 这些默认值**必须与 config.yaml [chip] / Config 的默认值保持一致**，
+# 否则 canary 验证的就不是线上真实链路。之所以在这里重复一份而不是
+# import ChipFetchPolicy，是为了守住本脚本「零业务依赖」的设计铁律
+# （见模块 docstring）：业务代码重构不得让 canary 失效。
+# 对应 config.yaml:
+#   chip.force_user_agent / chip.referer / chip.max_retries
+#   / chip.retry_backoff_seconds
+DEFAULT_CHIP_FORCE_USER_AGENT = True
+DEFAULT_CHIP_REFERER = "https://quote.eastmoney.com"
+DEFAULT_CHIP_MAX_RETRIES = 2
+DEFAULT_CHIP_RETRY_BACKOFF = 1.5
+DEFAULT_CHIP_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
 
 
 # ─────────────────────────────── 工具函数 ───────────────────────────────
@@ -120,29 +138,157 @@ def _result(status: str, **extra) -> dict:
     return base
 
 
+# ─────────────────────────────── 反爬补丁（分叉 B）───────────────────────────────
+@contextlib.contextmanager
+def chip_anti_crawl_patch(
+    *,
+    force_user_agent: bool = DEFAULT_CHIP_FORCE_USER_AGENT,
+    referer: str = DEFAULT_CHIP_REFERER,
+    timeout: float = DEFAULT_CHIP_TIMEOUT,
+):
+    """临时给所有 requests 出站请求注入 UA/Referer 的上下文管理器。
+
+    与 ``data_provider.akshare_fetcher.chip_anti_crawl_patch`` 行为对齐
+    （刻意不 import 业务代码，见模块 docstring 的「零业务依赖」铁律）：
+    唯一可靠的注入点是 ``requests.sessions.Session.request``，因为 akshare
+    内部所有出站请求最终都收敛到这里；改 ``requests.utils.default_headers()``
+    对已建 Session 无效。退出时在 finally 中无条件还原。
+
+    Args:
+        force_user_agent: False 时完全不做任何事（等价于旧行为）
+        referer: 注入的 Referer；空串表示不注入
+        timeout: 为未显式指定 timeout 的请求兜底注入的超时（<=0 表示不注入）
+
+    Yields:
+        bool: True 表示真正安装了补丁
+    """
+    if not force_user_agent:
+        yield False
+        return
+
+    try:
+        requests = _import_requests()
+    except Exception:  # requests 缺失时无声降级，探测本身仍继续
+        yield False
+        return
+
+    original = requests.sessions.Session.request
+    if getattr(original, "_probe_chip_patched", False):
+        yield False  # 幂等：已在补丁作用域内
+        return
+
+    def _wrapped(self, method, url, *args, **kwargs):
+        if args:  # 位置参数形式罕见，原样透传避免签名错位
+            return original(self, method, url, *args, **kwargs)
+        headers = dict(kwargs.pop("headers", None) or {})
+        lowered = {str(k).lower() for k in headers}
+        if "user-agent" not in lowered:
+            headers["User-Agent"] = DEFAULT_CHIP_USER_AGENT
+        if referer and "referer" not in lowered:
+            headers["Referer"] = referer
+        kwargs["headers"] = headers
+        if timeout and timeout > 0 and kwargs.get("timeout") is None:
+            kwargs["timeout"] = timeout
+        return original(self, method, url, **kwargs)
+
+    _wrapped._probe_chip_patched = True
+    requests.sessions.Session.request = _wrapped
+    try:
+        yield True
+    finally:
+        requests.sessions.Session.request = original
+
+
 # ─────────────────────────────── 各类探测 ───────────────────────────────
-def probe_chip_one(symbol: str, *, akshare=None, timeout: float = DEFAULT_CHIP_TIMEOUT) -> dict:
-    """探测单只股票的筹码分布（akshare.stock_cyq_em）。"""
+def probe_chip_one(
+    symbol: str,
+    *,
+    akshare=None,
+    timeout: float = DEFAULT_CHIP_TIMEOUT,
+    max_retries: int = DEFAULT_CHIP_MAX_RETRIES,
+    force_user_agent: bool = DEFAULT_CHIP_FORCE_USER_AGENT,
+    referer: str = DEFAULT_CHIP_REFERER,
+    retry_backoff: float = DEFAULT_CHIP_RETRY_BACKOFF,
+) -> dict:
+    """探测单只股票的筹码分布（akshare.stock_cyq_em）。
+
+    默认按分叉 B 的线上策略执行：注入反爬头 + 最多重试 ``max_retries`` 次。
+    这样 canary 验证的就是修复后的真实链路，而不是裸调用。
+
+    Args:
+        symbol: 股票代码
+        akshare: 注入的 akshare 模块（测试用），None 表示惰性真实导入
+        timeout: 单次调用超时（秒）
+        max_retries: 失败重试次数（0 = 不重试）；空结果不重试
+        force_user_agent: 是否注入 UA/Referer
+        referer: 注入的 Referer
+        retry_backoff: 指数退避基数（秒）
+
+    Returns:
+        结构化结果 dict，含 status / attempts / anti_crawl 等字段
+    """
     started = time.monotonic()
     try:
         ak = akshare if akshare is not None else _import_akshare()
     except Exception as exc:
         return _result("skip", reason="akshare_missing", error=str(exc), latency_ms=0.0, symbol=symbol)
 
-    try:
-        df = _run_with_timeout(lambda: ak.stock_cyq_em(symbol=symbol), timeout)
-    except Exception as exc:
-        return _result("error", error=str(exc), latency_ms=_latency_ms(started), symbol=symbol)
+    anti_crawl = {
+        "force_user_agent": bool(force_user_agent),
+        "referer": referer if force_user_agent else "",
+        "max_retries": int(max(0, max_retries)),
+    }
+    attempts_allowed = max(1, int(max_retries) + 1)
+    last_error = ""
 
-    if df is None or (hasattr(df, "empty") and df.empty) or (not hasattr(df, "empty") and len(df) == 0):
-        return _result("empty", latency_ms=_latency_ms(started), symbol=symbol)
+    for attempt in range(attempts_allowed):
+        try:
+            with chip_anti_crawl_patch(
+                force_user_agent=force_user_agent, referer=referer, timeout=timeout
+            ):
+                df = _run_with_timeout(lambda: ak.stock_cyq_em(symbol=symbol), timeout)
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+            if attempt < attempts_allowed - 1:
+                time.sleep(max(0.0, retry_backoff) * (2 ** attempt))
+                continue
+            return _result(
+                "error",
+                error=last_error,
+                latency_ms=_latency_ms(started),
+                symbol=symbol,
+                attempts=attempt + 1,
+                anti_crawl=anti_crawl,
+            )
 
+        # 空结果是「接口通但没内容」，重试无意义，直接短路
+        if df is None or (hasattr(df, "empty") and df.empty) or (not hasattr(df, "empty") and len(df) == 0):
+            return _result(
+                "empty",
+                latency_ms=_latency_ms(started),
+                symbol=symbol,
+                attempts=attempt + 1,
+                anti_crawl=anti_crawl,
+            )
+
+        return _result(
+            "ok",
+            rows=int(len(df)),
+            snippet=_df_snippet(df),
+            latency_ms=_latency_ms(started),
+            symbol=symbol,
+            attempts=attempt + 1,
+            anti_crawl=anti_crawl,
+        )
+
+    # 理论不可达（循环内所有分支都 return），兜底保证函数永远有返回值
     return _result(
-        "ok",
-        rows=int(len(df)),
-        snippet=_df_snippet(df),
+        "error",
+        error=last_error or "unreachable",
         latency_ms=_latency_ms(started),
         symbol=symbol,
+        attempts=attempts_allowed,
+        anti_crawl=anti_crawl,
     )
 
 
@@ -276,11 +422,21 @@ def run_probes(
     chip_timeout: float = DEFAULT_CHIP_TIMEOUT,
     news_timeout: float = DEFAULT_NEWS_TIMEOUT,
     raw_timeout: float = DEFAULT_RAW_TIMEOUT,
+    chip_max_retries: int = DEFAULT_CHIP_MAX_RETRIES,
+    chip_force_user_agent: bool = DEFAULT_CHIP_FORCE_USER_AGENT,
+    chip_referer: str = DEFAULT_CHIP_REFERER,
 ) -> dict:
     """执行全部探测，返回结构化报告（targets + summary）。"""
     targets = {
         "chip": {
-            sym: probe_chip_one(sym, akshare=akshare, timeout=chip_timeout)
+            sym: probe_chip_one(
+                sym,
+                akshare=akshare,
+                timeout=chip_timeout,
+                max_retries=chip_max_retries,
+                force_user_agent=chip_force_user_agent,
+                referer=chip_referer,
+            )
             for sym in chip_symbols
         },
         "news": {
@@ -329,6 +485,18 @@ def main(argv=None) -> int:
     parser.add_argument("--chip-timeout", type=float, default=DEFAULT_CHIP_TIMEOUT)
     parser.add_argument("--news-timeout", type=float, default=DEFAULT_NEWS_TIMEOUT)
     parser.add_argument("--raw-timeout", type=float, default=DEFAULT_RAW_TIMEOUT)
+    parser.add_argument(
+        "--chip-max-retries", type=int, default=DEFAULT_CHIP_MAX_RETRIES,
+        help="筹码探测失败重试次数（默认与 config.yaml chip.max_retries 一致）",
+    )
+    parser.add_argument(
+        "--chip-referer", default=DEFAULT_CHIP_REFERER,
+        help="筹码探测注入的 Referer（默认与 config.yaml chip.referer 一致）",
+    )
+    parser.add_argument(
+        "--no-chip-anti-crawl", action="store_true",
+        help="关闭反爬头注入，用于对照实验（复现修复前的裸调用行为）",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -336,6 +504,9 @@ def main(argv=None) -> int:
             chip_timeout=args.chip_timeout,
             news_timeout=args.news_timeout,
             raw_timeout=args.raw_timeout,
+            chip_max_retries=args.chip_max_retries,
+            chip_force_user_agent=not args.no_chip_anti_crawl,
+            chip_referer=args.chip_referer,
         )
         text = to_json(report)
         if args.out:

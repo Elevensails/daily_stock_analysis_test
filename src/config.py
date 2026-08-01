@@ -1263,6 +1263,17 @@ class Config:
     rag_news_total_budget_seconds: float = 25.0           # 新闻链路总时间预算（秒）
     rag_news_merge_sources: bool = False                  # True=多源合并；False=串行短路（默认）
     rag_news_min_items: int = 3                           # 命中多少条才算"够用"，不足则继续降级
+    # --- P1.6 筹码数据反爬策略组（CI 探测落到 B 分支：akshare 封装层被反爬）---
+    # CI 实证：GitHub Actions 上 ak.stock_cyq_em() 抛 RemoteDisconnected，
+    # 而裸 requests 直连东财 raw 接口返回 200 —— 说明被识别为爬虫而非接口下线。
+    # 这些字段由 ChipFetchPolicy.from_config() 读取（data_provider/realtime_types.py）。
+    chip_force_user_agent: bool = True                    # 是否给筹码请求注入反爬头（UA/Referer）
+    chip_referer: str = "https://quote.eastmoney.com"     # 注入的 Referer 头
+    chip_max_retries: int = 2                             # 筹码抓取失败重试次数（0 = 不重试）
+    chip_retry_backoff_seconds: float = 1.5               # 指数退避基数（秒）
+    chip_request_timeout_seconds: float = 10.0            # 单次筹码请求超时（秒，0 = 不注入）
+    chip_allow_tushare_fallback: bool = True              # 是否允许 tushare 兜底（有 token 才生效）
+    chip_disable_akshare: bool = False                    # 确认接口已死时整源关闭 akshare 筹码
 
     # --- Post-init validation ---------------------------------------------------
     _VALID_AGENT_ARCH = {"single", "multi"}
@@ -2299,6 +2310,46 @@ class Config:
                     _yaml_get(yaml_cfg, ['rag', 'news_min_items'], 3),
                 ),
                 3, field_name='RAG_NEWS_MIN_ITEMS', minimum=1,
+            ),
+            # P1.6 筹码数据反爬策略组（CI 探测 B 分支）
+            chip_force_user_agent=parse_env_bool(
+                os.getenv('CHIP_FORCE_USER_AGENT'),
+                default=bool(_yaml_get(yaml_cfg, ['chip', 'force_user_agent'], True)),
+            ),
+            chip_referer=str(
+                os.getenv(
+                    'CHIP_REFERER',
+                    _yaml_get(yaml_cfg, ['chip', 'referer'], 'https://quote.eastmoney.com'),
+                ) or ''
+            ).strip(),
+            chip_max_retries=parse_env_int(
+                os.getenv(
+                    'CHIP_MAX_RETRIES',
+                    _yaml_get(yaml_cfg, ['chip', 'max_retries'], 2),
+                ),
+                2, field_name='CHIP_MAX_RETRIES', minimum=0, maximum=10,
+            ),
+            chip_retry_backoff_seconds=parse_env_float(
+                os.getenv(
+                    'CHIP_RETRY_BACKOFF_SECONDS',
+                    _yaml_get(yaml_cfg, ['chip', 'retry_backoff_seconds'], 1.5),
+                ),
+                1.5, field_name='CHIP_RETRY_BACKOFF_SECONDS', minimum=0.0,
+            ),
+            chip_request_timeout_seconds=parse_env_float(
+                os.getenv(
+                    'CHIP_REQUEST_TIMEOUT_SECONDS',
+                    _yaml_get(yaml_cfg, ['chip', 'request_timeout_seconds'], 10.0),
+                ),
+                10.0, field_name='CHIP_REQUEST_TIMEOUT_SECONDS', minimum=0.0,
+            ),
+            chip_allow_tushare_fallback=parse_env_bool(
+                os.getenv('CHIP_ALLOW_TUSHARE_FALLBACK'),
+                default=bool(_yaml_get(yaml_cfg, ['chip', 'allow_tushare_fallback'], True)),
+            ),
+            chip_disable_akshare=parse_env_bool(
+                os.getenv('CHIP_DISABLE_AKSHARE'),
+                default=bool(_yaml_get(yaml_cfg, ['chip', 'disable_akshare'], False)),
             ),
         )
         apply_proxy_settings(cfg)

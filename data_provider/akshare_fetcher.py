@@ -23,6 +23,7 @@ AkshareFetcher - 主数据源 (Priority 1)
 - 筹码分布：获利比例、平均成本、筹码集中度
 """
 
+import contextlib
 import logging
 import multiprocessing
 import os
@@ -76,6 +77,125 @@ USER_AGENTS = [
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
     'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
 ]
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# P1.6 分叉 B：筹码接口反爬补丁
+#
+# CI 实证：GitHub Actions 上 ak.stock_cyq_em() 抛 RemoteDisconnected，
+# 而同一 runner 用裸 requests 直连东财 raw 接口返回 200 —— 说明是 akshare
+# 封装层发出的请求被识别成爬虫（缺 UA/Referer），而非接口下线。
+#
+# 为什么不能改 requests.utils.default_headers()：
+#   akshare 内部大量使用 `requests.get(...)` / 模块级已构造好的 Session，
+#   default_headers() 只在 **新建 Session** 时被复制一次，对已建 Session
+#   与 requests.api 的默认路径都不可靠 —— 实测无效。
+#
+# 唯一可靠的注入点是 `requests.sessions.Session.request`：所有 requests
+# 出站请求（含 requests.get / Session.get）最终都收敛到这里。
+# 因此改为「进入筹码抓取前临时 monkey-patch、离开时 finally 还原」，
+# 作用域被严格限制在单次 ak.stock_cyq_em() 调用内，不污染其他数据源。
+# ─────────────────────────────────────────────────────────────────────────
+
+# 打在包装函数上的幂等标记：同一进程内嵌套调用不重复包装
+_CHIP_PATCH_MARKER = '_dsa_chip_anti_crawl_wrapped'
+
+
+def _build_chip_anti_crawl_headers(policy: ChipFetchPolicy) -> Dict[str, str]:
+    """按策略生成一次筹码请求要注入的反爬请求头。
+
+    Args:
+        policy: 筹码抓取策略
+
+    Returns:
+        请求头字典；``policy.referer`` 为空时只含 User-Agent
+    """
+    headers: Dict[str, str] = {'User-Agent': random.choice(USER_AGENTS)}
+    if policy is not None and policy.referer:
+        headers['Referer'] = policy.referer
+    return headers
+
+
+@contextlib.contextmanager
+def chip_anti_crawl_patch(policy: ChipFetchPolicy):
+    """临时给所有 requests 出站请求注入反爬头的上下文管理器。
+
+    行为契约：
+    - ``policy.force_user_agent=False``（分叉 A 默认）时**完全不做任何事**，
+      连 import requests 都不触发，保证零行为变化；
+    - 幂等：若当前 ``Session.request`` 已是本模块的包装函数（嵌套调用），
+      不再二次包装，直接透传；
+    - 只补齐**调用方未显式提供**的头，不覆盖 akshare 自带的 headers；
+    - ``policy.request_timeout_seconds > 0`` 时为未显式指定 timeout 的请求
+      兜底注入超时（akshare 内部普遍不传 timeout，CI 上容易挂死）；
+    - 退出时在 ``finally`` 中无条件还原，异常路径也不会残留全局 patch。
+
+    并发语义（``max_workers=5`` 并行分析下必读）：
+    补丁是**进程级**的，多线程同时抓筹码时可能互相覆盖。但每个作用域只
+    还原「自己进入时看到的那个值」，且幂等标记杜绝了「层层包装 + 交错还原」
+    这一唯一会导致 patch 永久残留的场景。最坏情况仅是个别请求漏注入头
+    （由重试补偿），不会污染全局状态、也不会丢失原始实现。
+
+    Args:
+        policy: 筹码抓取策略
+
+    Yields:
+        bool: True 表示本次真正安装了补丁，False 表示未安装（关闭/嵌套/异常）
+    """
+    if policy is None or not policy.force_user_agent:
+        yield False
+        return
+
+    try:
+        import requests as _requests
+    except Exception as exc:  # requests 不可用时静默降级，绝不阻断抓取
+        logger.debug(f"[筹码] 反爬补丁不可用（requests 导入失败）: {exc}")
+        yield False
+        return
+
+    original = _requests.sessions.Session.request
+    if getattr(original, _CHIP_PATCH_MARKER, False):
+        # 已在补丁作用域内（嵌套调用），保持幂等
+        yield False
+        return
+
+    inject_headers = _build_chip_anti_crawl_headers(policy)
+    timeout_seconds = 0.0
+    try:
+        timeout_seconds = float(getattr(policy, 'request_timeout_seconds', 0.0) or 0.0)
+    except (TypeError, ValueError):
+        timeout_seconds = 0.0
+
+    def _wrapped(self, method, url, *args, **kwargs):
+        """包装 Session.request，补齐缺失的反爬头与超时。"""
+        if args:
+            # 位置参数形式（params/data/headers 按位置传）极罕见；
+            # 为避免签名错位改坏请求，这种情况直接原样透传。
+            return original(self, method, url, *args, **kwargs)
+
+        headers = dict(kwargs.pop('headers', None) or {})
+        existing = {str(k).lower() for k in headers}
+        for key, value in inject_headers.items():
+            if key.lower() not in existing:
+                headers[key] = value
+        kwargs['headers'] = headers
+
+        if timeout_seconds > 0 and kwargs.get('timeout') is None:
+            kwargs['timeout'] = timeout_seconds
+
+        return original(self, method, url, **kwargs)
+
+    setattr(_wrapped, _CHIP_PATCH_MARKER, True)
+    _wrapped.__name__ = 'request'
+    _wrapped.__qualname__ = 'Session.request'
+
+    _requests.sessions.Session.request = _wrapped
+    logger.debug(f"[筹码] 已安装反爬补丁: headers={list(inject_headers)}, timeout={timeout_seconds}")
+    try:
+        yield True
+    finally:
+        _requests.sessions.Session.request = original
+        logger.debug("[筹码] 已还原 requests.Session.request")
 
 
 # 缓存实时行情数据（避免重复请求）
@@ -406,19 +526,20 @@ class AkshareFetcher(BaseFetcher):
             eastmoney_patch()
     
     def _set_random_user_agent(self) -> None:
-        """
-        设置随机 User-Agent
-        
-        通过修改 requests Session 的 headers 实现
-        这是关键的反爬策略之一
+        """设置随机 User-Agent（**DEPRECATED，实际为 no-op**）。
+
+        历史实现只是选了个 UA 打日志，从未真正作用到 akshare 的
+        requests 调用上（akshare 不暴露内部 session）。P1.6 分叉 B 起，
+        真正生效的注入点是 :func:`chip_anti_crawl_patch`。
+
+        本方法予以保留（大量既有调用方与测试 ``patch.object`` 依赖它存在），
+        仅降级为「记录一条 debug 日志」的空操作，行为与此前完全一致。
+        新代码请勿再调用。
         """
         try:
-            import akshare as ak
-            # akshare 内部使用 requests，我们通过环境变量或直接设置来影响
-            # 实际上 akshare 可能不直接暴露 session，这里通过 fake_useragent 作为补充
             random_ua = random.choice(USER_AGENTS)
-            logger.debug(f"设置 User-Agent: {random_ua[:50]}...")
-        except Exception as e:
+            logger.debug(f"[deprecated] _set_random_user_agent no-op, UA={random_ua[:50]}...")
+        except Exception as e:  # random.choice 理论上不会失败，仅作兜底
             logger.debug(f"设置 User-Agent 失败: {e}")
     
     def _enforce_rate_limit(self) -> None:
@@ -1586,32 +1707,23 @@ class AkshareFetcher(BaseFetcher):
             self._chip_policy_cache = policy
         return policy
 
-    def _apply_chip_anti_crawl_headers(self, policy: ChipFetchPolicy) -> None:
+    def _apply_chip_anti_crawl_headers(self, policy: ChipFetchPolicy):
         """按策略注入反爬请求头（分叉 B 的落地点）。
 
-        akshare 内部对东财接口使用 ``requests.get``，这里通过修改
-        ``requests.utils.default_headers`` 影响不到已建连接，因此改为
-        设置进程级默认 Session headers；策略关闭时完全不做任何事，
-        保证分叉 A（默认）零行为变化。
+        返回一个**上下文管理器**：进入时临时包装
+        ``requests.sessions.Session.request`` 注入 UA/Referer，
+        退出时无条件还原，作用域严格限制在筹码抓取内。
+
+        历史实现修改 ``requests.utils.default_headers()``，实测对 akshare
+        已建 Session 无效（见 :func:`chip_anti_crawl_patch` 的注释），故废弃。
 
         Args:
             policy: 当前筹码抓取策略
+
+        Returns:
+            上下文管理器；``policy.force_user_agent=False`` 时为无副作用空壳
         """
-        if not policy.force_user_agent:
-            return
-        try:
-            import requests as _requests
-            session = getattr(_requests.sessions.Session, '_dsa_chip_headers', None)
-            headers = {'User-Agent': random.choice(USER_AGENTS)}
-            if policy.referer:
-                headers['Referer'] = policy.referer
-            # 直接更新 requests 的默认 headers，作用于后续新建 Session
-            _requests.utils.default_headers().update(headers)
-            if session is None:
-                setattr(_requests.sessions.Session, '_dsa_chip_headers', True)
-            logger.debug(f"[筹码] 已注入反爬请求头: {list(headers.keys())}")
-        except Exception as exc:
-            logger.debug(f"[筹码] 注入反爬请求头失败（忽略）: {exc}")
+        return chip_anti_crawl_patch(policy)
 
     def get_chip_distribution(self, stock_code: str) -> Optional[ChipDistribution]:
         """
@@ -1710,13 +1822,14 @@ class AkshareFetcher(BaseFetcher):
 
         api_start = _time.time()
         try:
-            # 防封禁策略
-            self._set_random_user_agent()
-            self._apply_chip_anti_crawl_headers(policy)
+            # 防封禁策略：限速在补丁作用域之外执行，避免 sleep 期间
+            # 全局 patch 影响其他线程发出的非筹码请求
             self._enforce_rate_limit()
 
             logger.info(f"[API调用] ak.stock_cyq_em(symbol={stock_code}) 获取筹码分布...")
-            df = ak.stock_cyq_em(symbol=stock_code)
+            # 反爬补丁只在这一次 akshare 调用期间生效，返回前 finally 还原
+            with self._apply_chip_anti_crawl_headers(policy):
+                df = ak.stock_cyq_em(symbol=stock_code)
             api_elapsed = _time.time() - api_start
 
             if df is None or df.empty:

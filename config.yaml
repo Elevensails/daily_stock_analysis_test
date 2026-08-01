@@ -110,6 +110,31 @@ rag:
   news_min_items: 3
 
 # ---------------------------------------------------------------------
+# chip：P1.6 筹码数据反爬策略（CI 探测落到 B 分支）
+# ---------------------------------------------------------------------
+# 实证背景：GitHub Actions 上 ak.stock_cyq_em() 抛 RemoteDisconnected，
+# 但同一 runner 裸 requests 直连东财 raw 接口返回 200 —— 判定为「akshare
+# 封装层被反爬识别」，而非接口下线。因此默认开启请求头注入 + 有限重试。
+# 对应 env：CHIP_FORCE_USER_AGENT / CHIP_REFERER / CHIP_MAX_RETRIES /
+#          CHIP_RETRY_BACKOFF_SECONDS / CHIP_REQUEST_TIMEOUT_SECONDS /
+#          CHIP_ALLOW_TUSHARE_FALLBACK / CHIP_DISABLE_AKSHARE
+chip:
+  # 是否给筹码请求注入 User-Agent / Referer（仅在筹码抓取期间临时生效）。
+  force_user_agent: true
+  # 注入的 Referer 头（东财对无 Referer 的机器请求更敏感）。
+  referer: "https://quote.eastmoney.com"
+  # 筹码抓取失败重试次数（0 = 不重试）。空数据不重试，仅网络类失败重试。
+  max_retries: 2
+  # 指数退避基数（秒）：第 n 次重试等待 backoff * 2^n。
+  retry_backoff_seconds: 1.5
+  # 单次筹码请求超时（秒）。akshare 内部不传 timeout，由补丁兜底注入；0 = 不注入。
+  request_timeout_seconds: 10.0
+  # 是否允许 tushare 兜底（需要配置 TUSHARE_TOKEN 才真正生效）。
+  allow_tushare_fallback: true
+  # 确认 akshare 筹码接口彻底不可用时置 true，直接整源关闭、省掉一次网络往返。
+  disable_akshare: false
+
+# ---------------------------------------------------------------------
 # profiles：P2 预留结构（仅解析、不切换）
 # ---------------------------------------------------------------------
 # 当前为空。后续可按需定义多套配置，通过环境变量 CONFIG_PROFILE 指定激活的
