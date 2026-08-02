@@ -896,6 +896,11 @@ class AgentExecutor:
             if isinstance(previous_slot_section, str) and previous_slot_section:
                 parts.append(previous_slot_section)
 
+            # U14 长期记忆：注入语义召回段落
+            _ltm_section = context.get("ltm_recall_section")
+            if _ltm_section and isinstance(_ltm_section, str):
+                parts.append("\n## 历史分析摘要（AI 长期记忆）\n\n" + _ltm_section + "\n")
+
             analysis_context_pack_summary = context.get("analysis_context_pack_summary")
             if isinstance(analysis_context_pack_summary, str) and analysis_context_pack_summary:
                 parts.append(analysis_context_pack_summary)

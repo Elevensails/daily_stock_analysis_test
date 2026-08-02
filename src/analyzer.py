@@ -3802,6 +3802,10 @@ class GeminiAnalyzer:
         )
         if previous_slot_stock_section:
             prompt += previous_slot_stock_section
+        # U14 长期记忆：注入语义召回段落
+        _ltm_section = context.get("ltm_recall_section")
+        if _ltm_section:
+            prompt += "\n## 历史分析摘要（AI 长期记忆）\n\n" + str(_ltm_section) + "\n"
         market_structure_section = format_market_structure_prompt_section(
             context.get("market_structure_context"),
             report_language=report_language,

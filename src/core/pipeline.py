@@ -255,6 +255,8 @@ class StockAnalysisPipeline:
         self._daily_market_context_service_lock = threading.Lock()
         self._concept_rankings_cache_lock = threading.Lock()
         self._concept_rankings_cache: Dict[str, Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]] = {}
+        # U14 长期记忆：惰性构造，避免 import 期拉起重模块
+        self.__dict__["_ltm"] = None
         
         # 初始化搜索服务（可选，初始化失败不应阻断主分析流程）
         try:
@@ -307,6 +309,14 @@ class StockAnalysisPipeline:
                 exc_info=True,
             )
             self.social_sentiment_service = None
+
+    @property
+    def _ltm(self):  # type: () -> Any
+        """U14 长期记忆门面（惰性构造，全链路共用同一 writer 缓冲）。"""
+        if self.__dict__.get("_ltm") is None:
+            from src.memory import LongTermMemory
+            self.__dict__["_ltm"] = LongTermMemory.from_config(self.config)
+        return self.__dict__["_ltm"]
 
     def _emit_progress(self, progress: int, message: str) -> None:
         """Best-effort bridge from pipeline stages to task SSE progress."""
@@ -735,6 +745,20 @@ class StockAnalysisPipeline:
                     )
                     rag_context = None
 
+            # U14 长期记忆：语义召回（Legacy 路径）
+            try:
+                _ltm_recall = self._ltm.recall_for_stock(
+                    code,
+                    f"{stock_name} {code} {report_type.value} {str(enhanced_context)[:2000]}",
+                )
+                _max_chars = int(getattr(self.config, 'ltm_max_prompt_tokens', 800) or 800)
+                from src.memory.formatter import format_memory_recall_section
+                _ltm_section = format_memory_recall_section(_ltm_recall, max_chars=_max_chars)
+                if _ltm_section:
+                    enhanced_context["ltm_recall_section"] = _ltm_section
+            except Exception as _exc:
+                logger.warning("[LTM] 语义召回失败（降级，不阻塞）: %s", _exc)
+
             # Step 7: 调用 AI 分析（传入增强的上下文和新闻）
             (
                 analysis_context_pack_summary,
@@ -909,6 +933,20 @@ class StockAnalysisPipeline:
                             context_snapshot=context_snapshot,
                             portfolio_context=portfolio_context,
                         )
+                        # U14 长期记忆：暂存结论
+                        try:
+                            self._ltm.remember(
+                                history_id=saved_history_id,
+                                code=code,
+                                name=stock_name,
+                                report_type=report_type.value,
+                                trend=getattr(result, 'trend_prediction', '') or '',
+                                advice=getattr(result, 'operation_advice', '') or '',
+                                summary=getattr(result, 'analysis_summary', '') or '',
+                                sentiment_score=getattr(result, 'sentiment_score', None),
+                            )
+                        except Exception as _exc:
+                            logger.warning("[LTM] 结论暂存失败（降级，不阻塞）: %s", _exc)
                 except Exception as e:
                     record_history_run(
                         report_saved=False,
@@ -1587,6 +1625,20 @@ class StockAnalysisPipeline:
                         stock_name, code, exc,
                     )
 
+            # U14 长期记忆：语义召回（Agent 路径）
+            try:
+                _ltm_recall = self._ltm.recall_for_stock(
+                    code,
+                    f"{stock_name} {code} {report_type.value} {str(initial_context)[:2000]}",
+                )
+                _max_chars = int(getattr(self.config, 'ltm_max_prompt_tokens', 800) or 800)
+                from src.memory.formatter import format_memory_recall_section
+                _ltm_section = format_memory_recall_section(_ltm_recall, max_chars=_max_chars)
+                if _ltm_section:
+                    initial_context["ltm_recall_section"] = _ltm_section
+            except Exception as _exc:
+                logger.warning("[LTM] Agent 语义召回失败（降级，不阻塞）: %s", _exc)
+
             # 运行 Agent
             if report_language in ("en", "ko"):
                 message = f"Analyze stock {code} ({stock_name}) and return the full decision dashboard JSON."
@@ -1869,6 +1921,20 @@ class StockAnalysisPipeline:
                             context_snapshot=agent_context_snapshot,
                             portfolio_context=portfolio_context,
                         )
+                        # U14 长期记忆：暂存结论（Agent 路径）
+                        try:
+                            self._ltm.remember(
+                                history_id=saved_history_id,
+                                code=code,
+                                name=stock_name,
+                                report_type=report_type.value,
+                                trend=getattr(result, 'trend_prediction', '') or '',
+                                advice=getattr(result, 'operation_advice', '') or '',
+                                summary=getattr(result, 'analysis_summary', '') or '',
+                                sentiment_score=getattr(result, 'sentiment_score', None),
+                            )
+                        except Exception as _exc:
+                            logger.warning("[LTM] Agent 结论暂存失败（降级，不阻塞）: %s", _exc)
                     latest_diagnostic_snapshot = current_diagnostic_snapshot()
                     if latest_diagnostic_snapshot is not None:
                         agent_context_snapshot["diagnostics"] = latest_diagnostic_snapshot
@@ -3495,6 +3561,15 @@ class StockAnalysisPipeline:
             else:
                 self._send_notifications(results, report_type)
         
+        # U14 长期记忆：run 末尾批量落盘
+        try:
+            _flush_stats = self._ltm.flush()
+            logger.info("[LTM] flush: pending=%d written=%d skipped=%d elapsed=%.1fms",
+                        _flush_stats.get("pending", 0), _flush_stats.get("written", 0),
+                        _flush_stats.get("skipped", 0), _flush_stats.get("elapsed_ms", 0))
+        except Exception as _exc:
+            logger.warning("[LTM] flush 异常（降级，不阻塞）: %s", _exc)
+
         return results
 
     def _send_single_stock_notification(
