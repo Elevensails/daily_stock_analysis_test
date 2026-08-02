@@ -278,6 +278,55 @@ class AgentMemory:
         return self.compute_skill_weights(strategy_ids, use_backtest=use_backtest)
 
     # -----------------------------------------------------------------
+    # Semantic recall (U14 · P0-4 薄委托)
+    # -----------------------------------------------------------------
+
+    def recall_similar(
+        self,
+        stock_code: str,
+        query_text: str,
+        *,
+        top_k: Optional[int] = None,
+        min_similarity: Optional[float] = None,
+        scope: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """语义召回（U14 新增）。
+
+        把当前情境文本交给长期记忆层召回历史相似情境，返回命中项字典列表
+        （字段对齐 ``RecallItem.to_safe_dict()``）。
+
+        正交性（设计 §8 第 12 条）：本方法**不检查** ``self.enabled``
+        （``agent_memory_enabled``）—— 语义召回是给 pipeline 用的独立能力，
+        不应被 Agent 记忆总开关连坐；这也保证 ``agent_memory_enabled=false``
+        （现状默认）时 U14 仍可独立验证。
+
+        Args:
+            stock_code: 当前股票代码。
+            query_text: 用于语义匹配的当前情境文本（由 pipeline 在 Step 5.6 构造）。
+            top_k / min_similarity / scope: 可选覆盖，缺省走 config。
+
+        Returns:
+            命中项字典列表；``ltm_enabled=false`` 或任何异常时返回 ``[]``。
+        """
+        try:
+            from src.memory import LongTermMemory  # 惰性导入，避免循环依赖
+
+            ltm = LongTermMemory.from_config()
+            if not ltm.enabled:
+                return []
+            result = ltm.recall_for_stock(
+                stock_code,
+                query_text,
+                top_k=top_k,
+                min_similarity=min_similarity,
+                scope=scope,
+            )
+            return [item.to_safe_dict() for item in result.items]
+        except Exception as exc:
+            logger.debug("[AgentMemory] recall_similar failed: %s", exc)
+            return []
+
+    # -----------------------------------------------------------------
     # Internal
     # -----------------------------------------------------------------
 

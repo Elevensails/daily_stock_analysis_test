@@ -62,6 +62,8 @@ _LAZY_EXPORTS = {
     "decode_vector": "src.memory.vector_store",
     "MemoryWriter": "src.memory.writer",
     "build_memory_writer": "src.memory.writer",
+    "LongTermMemory": "src.memory.recall",
+    "format_memory_recall_section": "src.memory.formatter",
     "append_recall_record": "src.memory.telemetry",
     "resolve_log_path": "src.memory.telemetry",
 }
@@ -116,6 +118,8 @@ __all__ = [
     "decode_vector",
     "MemoryWriter",
     "build_memory_writer",
+    "LongTermMemory",
+    "format_memory_recall_section",
     "append_recall_record",
     "resolve_log_path",
 ]
