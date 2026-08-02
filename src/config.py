@@ -1274,6 +1274,26 @@ class Config:
     chip_request_timeout_seconds: float = 10.0            # 单次筹码请求超时（秒，0 = 不注入）
     chip_allow_tushare_fallback: bool = True              # 是否允许 tushare 兜底（有 token 才生效）
     chip_disable_akshare: bool = False                    # 确认接口已死时整源关闭 akshare 筹码
+    # --- U14 长期记忆（语义召回层）组 ---
+    # 设计：docs/system_design_u14_long_term_memory.md §3.4
+    # 优先级：env LTM_* ▶ config.yaml ltm.* ▶ 代码默认；默认全关，开关关闭时主链路逐字节不变。
+    ltm_enabled: bool = False                             # 总开关（默认关闭）
+    ltm_write_enabled: bool = True                        # 是否写新向量（false = 只读召回旧记忆）
+    ltm_write_mode: str = "batch_end"                     # batch_end / text_only / off
+    ltm_embedding_provider: str = "auto"                  # auto / litellm / local
+    ltm_embedding_model: str = "openai/text-embedding-3-small"  # litellm 主路 embedding 模型
+    ltm_embedding_dim: int = 1024                         # 仅 local provider 的投影维度
+    ltm_top_k: int = 3                                    # 召回返回条数上限
+    ltm_min_similarity: float = 0.75                      # 原始余弦相似度阈值
+    ltm_scope: str = "same_stock"                         # same_stock / global
+    ltm_lookback_days: int = 90                           # 回溯窗口（天）
+    ltm_halflife_days: int = 60                           # 时间衰减半衰期（天），0 = 关闭
+    ltm_max_prompt_tokens: int = 500                      # LTM 段注入预算（字符近似口径）
+    ltm_joint_budget_chars: int = 2000                    # rag + ltm 联合护栏，超出优先砍 LTM
+    ltm_conclusion_max_chars: int = 500                   # 单条结论文本截断长度
+    ltm_embed_timeout_seconds: float = 8.0                # embedding 调用超时（秒）
+    ltm_max_candidates: int = 20000                       # 候选行数上界（内存护栏）
+    ltm_recall_log_path: str = "logs/memory_recall.jsonl"  # 召回命中日志路径
 
     # --- Post-init validation ---------------------------------------------------
     _VALID_AGENT_ARCH = {"single", "multi"}
@@ -2351,6 +2371,82 @@ class Config:
                 os.getenv('CHIP_DISABLE_AKSHARE'),
                 default=bool(_yaml_get(yaml_cfg, ['chip', 'disable_akshare'], False)),
             ),
+            # U14 长期记忆（语义召回层）组（设计 §3.4，17 字段）
+            ltm_enabled=parse_env_bool(
+                os.getenv('LTM_ENABLED'),
+                default=bool(_yaml_get(yaml_cfg, ['ltm', 'enable'], False)),
+            ),
+            ltm_write_enabled=parse_env_bool(
+                os.getenv('LTM_WRITE_ENABLED'),
+                default=bool(_yaml_get(yaml_cfg, ['ltm', 'write_enabled'], True)),
+            ),
+            ltm_write_mode=str(
+                os.getenv(
+                    'LTM_WRITE_MODE',
+                    _yaml_get(yaml_cfg, ['ltm', 'write_mode'], 'batch_end'),
+                ) or 'batch_end'
+            ).strip().lower(),
+            ltm_embedding_provider=str(
+                os.getenv(
+                    'LTM_EMBEDDING_PROVIDER',
+                    _yaml_get(yaml_cfg, ['ltm', 'embedding_provider'], 'auto'),
+                ) or 'auto'
+            ).strip().lower(),
+            ltm_embedding_model=str(
+                os.getenv(
+                    'LTM_EMBEDDING_MODEL',
+                    _yaml_get(yaml_cfg, ['ltm', 'embedding_model'], 'openai/text-embedding-3-small'),
+                ) or 'openai/text-embedding-3-small'
+            ).strip(),
+            ltm_embedding_dim=parse_env_int(
+                os.getenv('LTM_EMBEDDING_DIM', _yaml_get(yaml_cfg, ['ltm', 'embedding_dim'], 1024)),
+                1024, field_name='LTM_EMBEDDING_DIM', minimum=8, maximum=8192,
+            ),
+            ltm_top_k=parse_env_int(
+                os.getenv('LTM_TOP_K', _yaml_get(yaml_cfg, ['ltm', 'top_k'], 3)),
+                3, field_name='LTM_TOP_K', minimum=1, maximum=50,
+            ),
+            ltm_min_similarity=parse_env_float(
+                os.getenv('LTM_MIN_SIMILARITY', _yaml_get(yaml_cfg, ['ltm', 'min_similarity'], 0.75)),
+                0.75, field_name='LTM_MIN_SIMILARITY', minimum=-1.0, maximum=1.0,
+            ),
+            ltm_scope=str(
+                os.getenv('LTM_SCOPE', _yaml_get(yaml_cfg, ['ltm', 'scope'], 'same_stock')) or 'same_stock'
+            ).strip().lower(),
+            ltm_lookback_days=parse_env_int(
+                os.getenv('LTM_LOOKBACK_DAYS', _yaml_get(yaml_cfg, ['ltm', 'lookback_days'], 90)),
+                90, field_name='LTM_LOOKBACK_DAYS', minimum=0,
+            ),
+            ltm_halflife_days=parse_env_int(
+                os.getenv('LTM_HALFLIFE_DAYS', _yaml_get(yaml_cfg, ['ltm', 'halflife_days'], 60)),
+                60, field_name='LTM_HALFLIFE_DAYS', minimum=0,
+            ),
+            ltm_max_prompt_tokens=parse_env_int(
+                os.getenv('LTM_MAX_PROMPT_TOKENS', _yaml_get(yaml_cfg, ['ltm', 'max_prompt_tokens'], 500)),
+                500, field_name='LTM_MAX_PROMPT_TOKENS', minimum=0,
+            ),
+            ltm_joint_budget_chars=parse_env_int(
+                os.getenv('LTM_JOINT_BUDGET_CHARS', _yaml_get(yaml_cfg, ['ltm', 'joint_budget_chars'], 2000)),
+                2000, field_name='LTM_JOINT_BUDGET_CHARS', minimum=0,
+            ),
+            ltm_conclusion_max_chars=parse_env_int(
+                os.getenv('LTM_CONCLUSION_MAX_CHARS', _yaml_get(yaml_cfg, ['ltm', 'conclusion_max_chars'], 500)),
+                500, field_name='LTM_CONCLUSION_MAX_CHARS', minimum=1,
+            ),
+            ltm_embed_timeout_seconds=parse_env_float(
+                os.getenv('LTM_EMBED_TIMEOUT_SECONDS', _yaml_get(yaml_cfg, ['ltm', 'embed_timeout_seconds'], 8.0)),
+                8.0, field_name='LTM_EMBED_TIMEOUT_SECONDS', minimum=0.0,
+            ),
+            ltm_max_candidates=parse_env_int(
+                os.getenv('LTM_MAX_CANDIDATES', _yaml_get(yaml_cfg, ['ltm', 'max_candidates'], 20000)),
+                20000, field_name='LTM_MAX_CANDIDATES', minimum=1,
+            ),
+            ltm_recall_log_path=str(
+                os.getenv(
+                    'LTM_RECALL_LOG_PATH',
+                    _yaml_get(yaml_cfg, ['ltm', 'recall_log_path'], 'logs/memory_recall.jsonl'),
+                ) or 'logs/memory_recall.jsonl'
+            ).strip(),
         )
         apply_proxy_settings(cfg)
         return cfg
@@ -3661,6 +3757,56 @@ class Config:
                 ),
                 field="TIME_SLOT_DEFAULT",
                 code="u16_time_slot_default",
+            ))
+
+        # --- U14 长期记忆（语义召回层）字段校验（设计 §3.4，4 条）---
+        _ltm_valid_providers = {"auto", "litellm", "local"}
+        if self.ltm_embedding_provider not in _ltm_valid_providers:
+            issues.append(ConfigIssue(
+                severity="error",
+                message=(
+                    f"LTM_EMBEDDING_PROVIDER={self.ltm_embedding_provider!r} 非法，"
+                    f"支持：{'、'.join(sorted(_ltm_valid_providers))}。"
+                ),
+                field="LTM_EMBEDDING_PROVIDER",
+                code="u14_ltm_embedding_provider",
+            ))
+        _ltm_valid_write_modes = {"batch_end", "text_only", "off"}
+        if self.ltm_write_mode not in _ltm_valid_write_modes:
+            issues.append(ConfigIssue(
+                severity="error",
+                message=(
+                    f"LTM_WRITE_MODE={self.ltm_write_mode!r} 非法，"
+                    f"支持：{'、'.join(sorted(_ltm_valid_write_modes))}。"
+                ),
+                field="LTM_WRITE_MODE",
+                code="u14_ltm_write_mode",
+            ))
+        _ltm_valid_scopes = {"same_stock", "global"}
+        if self.ltm_scope not in _ltm_valid_scopes:
+            issues.append(ConfigIssue(
+                severity="error",
+                message=(
+                    f"LTM_SCOPE={self.ltm_scope!r} 非法，"
+                    f"支持：{'、'.join(sorted(_ltm_valid_scopes))}。"
+                ),
+                field="LTM_SCOPE",
+                code="u14_ltm_scope",
+            ))
+        if (
+            self.ltm_enabled
+            and self.ltm_embedding_provider == "litellm"
+            and not [k for k in (self.openai_api_keys or []) if k and len(k) >= 8]
+        ):
+            issues.append(ConfigIssue(
+                severity="warning",
+                message=(
+                    "LTM_ENABLED=true 且 LTM_EMBEDDING_PROVIDER=litellm，但未配置 OPENAI_API_KEY。"
+                    "显式指定 litellm 时不会自动降级到本地词法向量，语义召回将持续失败并空返回。"
+                    "如需断网兜底，请改用 LTM_EMBEDDING_PROVIDER=auto 或 local。"
+                ),
+                field="LTM_EMBEDDING_PROVIDER",
+                code="u14_ltm_litellm_without_key",
             ))
 
         return issues

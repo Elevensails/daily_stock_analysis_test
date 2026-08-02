@@ -110,6 +110,57 @@ rag:
   news_min_items: 3
 
 # ---------------------------------------------------------------------
+# ltm：U14 长期记忆（语义召回层）配置
+# ---------------------------------------------------------------------
+# 设计：docs/system_design_u14_long_term_memory.md §3.4
+# 对应 env：LTM_ENABLED / LTM_WRITE_ENABLED / LTM_WRITE_MODE /
+#          LTM_EMBEDDING_PROVIDER / LTM_EMBEDDING_MODEL / LTM_EMBEDDING_DIM /
+#          LTM_TOP_K / LTM_MIN_SIMILARITY / LTM_SCOPE / LTM_LOOKBACK_DAYS /
+#          LTM_HALFLIFE_DAYS / LTM_MAX_PROMPT_TOKENS / LTM_JOINT_BUDGET_CHARS /
+#          LTM_CONCLUSION_MAX_CHARS / LTM_EMBED_TIMEOUT_SECONDS /
+#          LTM_MAX_CANDIDATES / LTM_RECALL_LOG_PATH
+# 默认全关：enable=false 时主链路 prompt 逐字节不变，无任何新增开销。
+ltm:
+  # 语义召回总开关（env LTM_ENABLED 优先）。
+  enable: false
+  # 是否写入新向量。false = 只读召回已有记忆（不产生新的 embedding 开销）。
+  write_enabled: true
+  # 写入模式：
+  #   batch_end — 单股只做文本抽取入内存缓冲（零网络），run 收尾一次性批量 embed + 落盘
+  #   text_only — 只落结论文本，向量交给 scripts/backfill_ltm.py 离线补（CI 首选）
+  #   off       — 完全不写
+  write_mode: "batch_end"
+  # embedding provider：auto（litellm 可用则用，否则降级 local）/ litellm / local。
+  embedding_provider: "auto"
+  # litellm 主路 embedding 模型（维度由服务端决定，text-embedding-3-small = 1536）。
+  embedding_model: "openai/text-embedding-3-small"
+  # 本地词法向量的投影维度（**仅 local provider 生效**，不影响 litellm）。
+  embedding_dim: 1024
+  # 单次召回返回的最大条数。
+  top_k: 3
+  # 原始余弦相似度阈值；低于此值不返回（阈值只卡原始相似度，不卡衰减后分数）。
+  min_similarity: 0.75
+  # 召回范围：same_stock（同标的，默认）/ global（跨标的，需 formatter 标注来源）。
+  scope: "same_stock"
+  # 回溯窗口（天）。0 = 不限制。
+  lookback_days: 90
+  # 时间衰减半衰期（天）：final = similarity * 0.5^(age/halflife)。0 = 关闭衰减。
+  halflife_days: 60
+  # LTM prompt section 最大字符数（中文近似 token 数，与 rag.max_prompt_tokens 同口径）。
+  max_prompt_tokens: 500
+  # rag + ltm 联合字符护栏：实际预算 = min(max_prompt_tokens, joint_budget_chars - len(rag_section))。
+  # 预算 <= 0 时 LTM 段整体不注入（行情数据优先级恒高于历史观点）。
+  joint_budget_chars: 2000
+  # 单条结论文本的截断长度（入库前生效）。
+  conclusion_max_chars: 500
+  # embedding 调用超时（秒），对齐 rag.neodata_timeout_seconds。
+  embed_timeout_seconds: 8.0
+  # 单次召回加载的候选行数上界（内存护栏；1536 维 float32 下 20000 行 ≈ 117 MB）。
+  max_candidates: 20000
+  # 召回命中日志路径（jsonl，每次召回恰好一条，含 0 命中与降级场景）。
+  recall_log_path: "logs/memory_recall.jsonl"
+
+# ---------------------------------------------------------------------
 # chip：P1.6 筹码数据反爬策略（CI 探测落到 B 分支）
 # ---------------------------------------------------------------------
 # 实证背景：GitHub Actions 上 ak.stock_cyq_em() 抛 RemoteDisconnected，

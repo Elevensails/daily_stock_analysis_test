@@ -33,6 +33,7 @@ from sqlalchemy import (
     Integer,
     ForeignKey,
     Index,
+    LargeBinary,
     UniqueConstraint,
     Text,
     text,
@@ -359,6 +360,90 @@ class AnalysisHistory(Base):
             'secondary_buy': self.secondary_buy,
             'stop_loss': self.stop_loss,
             'take_profit': self.take_profit,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class AnalysisMemoryVector(Base):
+    """U14 长期记忆向量表（语义召回层）。
+
+    每行 = 一条历史分析结论的规范化文本 + 其 embedding 向量。
+    向量以 ``np.float32.tobytes()`` 存入 LargeBinary，**落盘前已 L2 归一化**，
+    因此检索侧的余弦相似度退化为矩阵点积（见 docs/system_design_u14_long_term_memory.md §8.1）。
+
+    设计要点：
+    - ``history_id`` 溯源 ``analysis_history.id``，但**不加 ForeignKey 约束**，
+      避免存量库在外键校验下建表/写入失败。
+    - 唯一键为 ``(history_id, model_id, vector_version)`` 复合唯一，允许同一条
+      历史同时持有 litellm 与 local 两套向量，支持模型灰度并存与随时回滚。
+    - ``time_slot`` 为本表自带的冗余列（``AnalysisHistory`` 没有这一列），
+      避免改动存量表结构（PRD Q4）。
+    - 建表依赖 ``Base.metadata.create_all()``，无需 migration 脚本。
+    """
+
+    __tablename__ = 'analysis_memory_vector'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # 溯源（不加 FK：存量库安全）
+    history_id = Column(Integer, nullable=False, index=True)
+
+    # 股票信息（冗余，免 join）
+    code = Column(String(10), nullable=False, index=True)
+    name = Column(String(50))
+    report_type = Column(String(16), index=True)
+
+    # 时间维度
+    trade_date = Column(String(10), index=True)   # YYYY-MM-DD
+    time_slot = Column(String(4), index=True)     # HHMM，如 '0930' / '1500' / '1800'
+
+    # 被向量化的规范化文本与其内容指纹
+    conclusion_text = Column(Text)
+    text_hash = Column(String(64), index=True)    # sha256(conclusion_text)
+
+    # 向量本体
+    embedding = Column(LargeBinary)               # np.float32.tobytes()，已 L2 归一化
+    dim = Column(Integer, default=0)
+
+    # 版本治理：查询恒带 (model_id, vector_version) 双过滤
+    model_id = Column(String(64), nullable=False, index=True)
+    # 与 src/memory/models.py::VECTOR_VERSION 保持一致（抽取/归一化逻辑变更时 +1）
+    vector_version = Column(Integer, nullable=False, default=1, index=True)
+
+    # 结论冗余字段（渲染召回段落时免 join）
+    sentiment_score = Column(Integer)
+    operation_advice = Column(String(20))
+
+    created_at = Column(DateTime, default=datetime.now, index=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            'history_id', 'model_id', 'vector_version',
+            name='uq_memvec_history_model',
+        ),
+        Index('ix_memvec_code_date', 'code', 'trade_date'),
+        Index('ix_memvec_model_version', 'model_id', 'vector_version'),
+        Index('ix_memvec_scope_scan', 'model_id', 'vector_version', 'code', 'trade_date'),
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典（不含 embedding 二进制本体，仅报告其字节长度）。"""
+        return {
+            'id': self.id,
+            'history_id': self.history_id,
+            'code': self.code,
+            'name': self.name,
+            'report_type': self.report_type,
+            'trade_date': self.trade_date,
+            'time_slot': self.time_slot,
+            'conclusion_text': self.conclusion_text,
+            'text_hash': self.text_hash,
+            'embedding_bytes': len(self.embedding) if self.embedding else 0,
+            'dim': self.dim,
+            'model_id': self.model_id,
+            'vector_version': self.vector_version,
+            'sentiment_score': self.sentiment_score,
+            'operation_advice': self.operation_advice,
             'created_at': self.created_at.isoformat() if self.created_at else None,
         }
 
