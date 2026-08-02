@@ -52,7 +52,7 @@ jobs:
   analyze-emit:
     needs: data-fetch
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     permissions:
       contents: write
       pages: write
