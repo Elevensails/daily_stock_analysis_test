@@ -122,7 +122,7 @@ rag:
 # 默认全关：enable=false 时主链路 prompt 逐字节不变，无任何新增开销。
 ltm:
   # 语义召回总开关（env LTM_ENABLED 优先）。
-  enable: false
+  enable: true
   # 是否写入新向量。false = 只读召回已有记忆（不产生新的 embedding 开销）。
   write_enabled: true
   # 写入模式：
@@ -131,7 +131,7 @@ ltm:
   #   off       — 完全不写
   write_mode: "batch_end"
   # embedding provider：auto（litellm 可用则用，否则降级 local）/ litellm / local。
-  embedding_provider: "auto"
+  embedding_provider: "local"
   # litellm 主路 embedding 模型（维度由服务端决定，text-embedding-3-small = 1536）。
   embedding_model: "openai/text-embedding-3-small"
   # 本地词法向量的投影维度（**仅 local provider 生效**，不影响 litellm）。
@@ -139,7 +139,7 @@ ltm:
   # 单次召回返回的最大条数。
   top_k: 3
   # 原始余弦相似度阈值；低于此值不返回（阈值只卡原始相似度，不卡衰减后分数）。
-  min_similarity: 0.75
+  min_similarity: 0.25
   # 召回范围：same_stock（同标的，默认）/ global（跨标的，需 formatter 标注来源）。
   scope: "same_stock"
   # 回溯窗口（天）。0 = 不限制。
