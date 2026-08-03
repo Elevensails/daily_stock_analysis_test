@@ -60,12 +60,10 @@ def test_ac1_direction_repaired_and_emitted():
     )
     assert isinstance(res, RepairResult)
     assert res.passed is True
+    # market_review 的 self_consistency 现为 warn 级（不拦截），不再进 repair loop
     assert res.final_action == "emit"
-    assert res.rounds >= 1
-    assert res.rewritten is True
-    assert res.final_text == DIRECTION_FIXED
-    # reasons 应进入重写 prompt（grounding 信号送达模型）
-    assert any("称涨停但出现负收益" in u for _, u in calls)
+    assert res.rounds == 0
+    assert res.rewritten is False
 
 
 def test_ac1_redline_repaired_and_emitted():

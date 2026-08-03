@@ -182,21 +182,22 @@ def _check_internal_consistency(text: str, report_kind: str = "stock") -> CheckR
     """
     is_market = report_kind in ("market_review", "market")
     if is_market:
-        # 段内检查：至少有 1 个段落**同时**含「涨停/跌停」标记与反向涨跌幅
+        # 大盘报告天然描述多标的，段内「涨停+负收益」也可能分属不同实体
+        # → 仅降分不拦截（warn），由 degraded_segments 剥离对应段落
         for para in split_paragraphs(text):
             if _LIMIT_UP_RE.search(para.text):
                 neg = re.search(r"-\d{1,2}(?:\.\d+)?\s*%", para.text)
                 if neg:
                     return CheckResult(
                         "self_consistency", False,
-                        f"称涨停但同段出现负收益 {neg.group(0)}", "critical",
+                        f"称涨停但同段出现负收益 {neg.group(0)}（大盘报告，仅降分不拦截）", "warn",
                     )
             if _LIMIT_DOWN_RE.search(para.text):
                 pos = re.search(r"([+\-]?\d{1,2}(?:\.\d+)?)\s*%", para.text)
                 if pos and float(pos.group(1)) > 0:
                     return CheckResult(
                         "self_consistency", False,
-                        f"称跌停但同段出现正收益 {pos.group(0)}", "critical",
+                        f"称跌停但同段出现正收益 {pos.group(0)}（大盘报告，仅降分不拦截）", "warn",
                     )
         return CheckResult("self_consistency", True, "无涨停/跌停段内自相矛盾", "warn")
 
@@ -527,12 +528,15 @@ def validate(
         reasons.append(f"[红线] {rl.detail}")
         critical_failed = True
 
-    # 2) 内部数字一致性（致命）
+    # 2) 内部数字一致性（stock: 致命；market: 仅降分不拦截）
     sc = _check_internal_consistency(text, report_kind=report_kind)
     checks.append(sc)
     if not sc.passed:
         reasons.append(f"[自相矛盾] {sc.detail}")
-        critical_failed = True
+        if sc.severity == "critical":
+            critical_failed = True
+        else:
+            score -= 0.15
 
     # 3) 不可能数值（软）
     iv = _check_impossible_value(text)
