@@ -173,8 +173,34 @@ def _check_red_lines(text: str) -> Optional[CheckResult]:
     return CheckResult("red_line", True, "未检出红线违规", "critical")
 
 
-def _check_internal_consistency(text: str) -> CheckResult:
-    """称涨停 / 跌停但同篇出现相反方向的涨跌幅 → 自相矛盾。"""
+def _check_internal_consistency(text: str, report_kind: str = "stock") -> CheckResult:
+    """称涨停 / 跌停但同篇出现相反方向的涨跌幅 → 自相矛盾。
+
+    对个股报告（stock）：全文级扫，任何段落含"涨停"且全文存在负收益即矛盾。
+    对大盘复盘（market_review / market）：**仅段内检查**——不同板块/个股涨跌不一
+    是真实市场特征，不构成自相矛盾；仅当同一段落同时出现「涨停」与负收益才判 fail。
+    """
+    is_market = report_kind in ("market_review", "market")
+    if is_market:
+        # 段内检查：至少有 1 个段落**同时**含「涨停/跌停」标记与反向涨跌幅
+        for para in split_paragraphs(text):
+            if _LIMIT_UP_RE.search(para.text):
+                neg = re.search(r"-\d{1,2}(?:\.\d+)?\s*%", para.text)
+                if neg:
+                    return CheckResult(
+                        "self_consistency", False,
+                        f"称涨停但同段出现负收益 {neg.group(0)}", "critical",
+                    )
+            if _LIMIT_DOWN_RE.search(para.text):
+                pos = re.search(r"([+\-]?\d{1,2}(?:\.\d+)?)\s*%", para.text)
+                if pos and float(pos.group(1)) > 0:
+                    return CheckResult(
+                        "self_consistency", False,
+                        f"称跌停但同段出现正收益 {pos.group(0)}", "critical",
+                    )
+        return CheckResult("self_consistency", True, "无涨停/跌停段内自相矛盾", "warn")
+
+    # 全文级（stock 报告）：跨段冲突即矛盾
     if _LIMIT_UP_RE.search(text):
         neg = re.search(r"-\d{1,2}(?:\.\d+)?\s*%", text)
         if neg:
@@ -186,7 +212,6 @@ def _check_internal_consistency(text: str) -> CheckResult:
             )
     if _LIMIT_DOWN_RE.search(text):
         pos = re.search(r"([+\-]?\d{1,2}(?:\.\d+)?)\s*%", text)
-        # 跌停股同篇出现明显正收益，视为矛盾
         if pos and float(pos.group(1)) > 0:
             return CheckResult(
                 "self_consistency",
@@ -503,7 +528,7 @@ def validate(
         critical_failed = True
 
     # 2) 内部数字一致性（致命）
-    sc = _check_internal_consistency(text)
+    sc = _check_internal_consistency(text, report_kind=report_kind)
     checks.append(sc)
     if not sc.passed:
         reasons.append(f"[自相矛盾] {sc.detail}")
