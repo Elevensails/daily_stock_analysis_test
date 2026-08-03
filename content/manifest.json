@@ -1,6 +1,6 @@
 {
   "schemaVersion": "1.0",
-  "generatedAt": "2026-08-03 14:38",
+  "generatedAt": "2026-08-03 18:02",
   "model": "deepseek/deepseek-v4-flash",
   "site": {
     "title": "A股智能分析 · 决策仪表盘",
@@ -18,7 +18,7 @@
       "name": "午间复盘",
       "fragments": {
         "report": null,
-        "market_review": "market_review_20260803.html",
+        "market_review": null,
         "vibe": null
       }
     },
@@ -26,8 +26,8 @@
       "label": "14:30",
       "name": "午盘追踪",
       "fragments": {
-        "report": "report_1430_20260803.html",
-        "market_review": "market_review_1430_20260803.html",
+        "report": null,
+        "market_review": null,
         "vibe": null
       }
     },
@@ -36,8 +36,8 @@
       "name": "收盘复盘",
       "fragments": {
         "report": null,
-        "market_review": "market_review_20260803.html",
-        "vibe": null
+        "market_review": null,
+        "vibe": "vibe_1800_20260803.html"
       }
     },
     "0900": {
@@ -45,7 +45,7 @@
       "name": "早盘分析",
       "fragments": {
         "report": null,
-        "market_review": "market_review_20260803.html",
+        "market_review": null,
         "vibe": null
       }
     },
@@ -54,7 +54,7 @@
       "name": "开盘追踪",
       "fragments": {
         "report": null,
-        "market_review": "market_review_20260803.html",
+        "market_review": null,
         "vibe": null
       }
     }
