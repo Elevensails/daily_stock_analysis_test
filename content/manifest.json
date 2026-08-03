@@ -1,6 +1,6 @@
 {
   "schemaVersion": "1.0",
-  "generatedAt": "2026-08-03 12:39",
+  "generatedAt": "2026-08-03 14:32",
   "model": "deepseek/deepseek-v4-flash",
   "site": {
     "title": "A股智能分析 · 决策仪表盘",
@@ -17,8 +17,8 @@
       "label": "12:00",
       "name": "午间复盘",
       "fragments": {
-        "report": "report_1200_20260803.html",
-        "market_review": "market_review_1200_20260803.html",
+        "report": null,
+        "market_review": null,
         "vibe": null
       }
     },
@@ -27,14 +27,8 @@
       "name": "午盘追踪",
       "fragments": {
         "report": null,
-        "market_review": "market_review_20260803.html",
-        "vibe": null
-      },
-      "fragmentMeta": {
-        "market_review": {
-          "degraded": true,
-          "removedSegments": 1
-        }
+        "market_review": null,
+        "vibe": "vibe_1430_20260803.html"
       }
     },
     "1800": {
@@ -42,14 +36,8 @@
       "name": "收盘复盘",
       "fragments": {
         "report": null,
-        "market_review": "market_review_20260803.html",
+        "market_review": null,
         "vibe": null
-      },
-      "fragmentMeta": {
-        "market_review": {
-          "degraded": true,
-          "removedSegments": 1
-        }
       }
     },
     "0900": {
@@ -57,14 +45,8 @@
       "name": "早盘分析",
       "fragments": {
         "report": null,
-        "market_review": "market_review_20260803.html",
+        "market_review": null,
         "vibe": null
-      },
-      "fragmentMeta": {
-        "market_review": {
-          "degraded": true,
-          "removedSegments": 1
-        }
       }
     },
     "0930": {
@@ -72,14 +54,8 @@
       "name": "开盘追踪",
       "fragments": {
         "report": null,
-        "market_review": "market_review_20260803.html",
+        "market_review": null,
         "vibe": null
-      },
-      "fragmentMeta": {
-        "market_review": {
-          "degraded": true,
-          "removedSegments": 1
-        }
       }
     }
   },
