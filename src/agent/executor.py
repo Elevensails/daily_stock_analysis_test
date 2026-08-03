@@ -698,6 +698,10 @@ class AgentExecutor:
             skills_section=skills_section,
             language_section=_build_language_section(report_language),
         )
+        # 按时段注入分析视角与口吻指令
+        time_slot_guidance = _build_time_slot_guidance()
+        if time_slot_guidance:
+            system_prompt += time_slot_guidance
 
         # Build tool declarations in OpenAI format (litellm handles all providers)
         tool_decls = self.tool_registry.to_openai_tools()
@@ -915,3 +919,26 @@ class AgentExecutor:
 
         parts.append("\n请使用可用工具获取缺失的数据（如历史K线、新闻等），然后以决策仪表盘 JSON 格式输出分析结果。")
         return "\n".join(parts)
+
+
+def _build_time_slot_guidance() -> str:
+    """根据当前时段（config.time_slot_default）注入分析视角与口吻指令。"""
+    try:
+        from src.config import get_config
+        cfg = get_config()
+        ts = str(getattr(cfg, "time_slot_default", "1800") or "1800").strip()
+    except Exception:
+        return ""
+    if ts not in ("0900", "0930", "1200", "1430", "1800"):
+        return ""
+    guidance = {
+        "0900": "你正在撰写**早盘前瞻**报告。市场即将开盘，聚焦隔夜外盘、今日关注点位；使用前瞻性口吻，避免收盘总结语言。",
+        "0930": "你正在撰写**开盘跟踪**报告。开盘约 30 分钟，聚焦开盘方向与早盘资金；使用实时跟踪口吻。",
+        "1200": "你正在撰写**午间复盘**报告。上午已结束，回顾走势并推演下午方向；使用午间口吻，**严禁使用收盘总结性语言**。",
+        "1430": "你正在撰写**尾盘追踪**报告。距收盘约 30 分钟，聚焦尾盘动向与次日预判。",
+        "1800": "你正在撰写**全天收盘复盘**报告。市场已收盘，完整回顾全天走势并展望明日。",
+    }
+    instr = guidance.get(ts, "")
+    if not instr:
+        return ""
+    return f"\n\n## 当前时段分析要求（最高优先级）\n\n{instr}"

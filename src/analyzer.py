@@ -2397,6 +2397,10 @@ class GeminiAnalyzer:
                 .replace("{default_skill_policy_section}", default_skill_policy_section)
                 .replace("{skills_section}", skills_section)
             )
+        # 按时段注入分析视角与口吻指令
+        time_slot_guidance = self._get_time_slot_guidance()
+        base_prompt += time_slot_guidance
+
         if lang == "en":
             return base_prompt + """
 
@@ -2427,6 +2431,62 @@ class GeminiAnalyzer:
 - `decision_type` 必须保持为 `buy|hold|sell`。
 - 所有面向用户的人类可读文本值必须使用中文。
 """
+
+    def _get_time_slot_guidance(self) -> str:
+        """根据当前时段注入分析视角与口吻指令。
+
+        Returns:
+            附加到 system prompt 末尾的时段指导段落。
+        """
+        # 从 config 读取当前时槽（环境变量 TIME_SLOT 优先）
+        cfg = self._get_runtime_config() if hasattr(self, "_get_runtime_config") else None
+        ts = "1800"
+        if cfg is not None:
+            ts = str(getattr(cfg, "time_slot_default", "1800") or "1800")
+        ts = ts.strip()
+        if ts not in ("0900", "0930", "1200", "1430", "1800"):
+            return ""  # 非标准时槽不注入
+
+        guidance = {
+            "0900": (
+                "你正在撰写**早盘前瞻**报告。市场即将开盘，请聚焦：\n"
+                "- 隔夜外盘走势与重大消息对今日开盘的潜在影响\n"
+                "- 昨日收盘后的关键技术位突破或失守\n"
+                "- 使用「今日关注」「盘前策略」「预计」等前瞻性口吻\n"
+                "- 避免使用收盘总结性语言（如「全天」「最终」「收盘报收」）"
+            ),
+            "0930": (
+                "你正在撰写**开盘跟踪**报告。市场刚开盘约 30 分钟，请聚焦：\n"
+                "- 开盘方向与集合竞价的量价信号\n"
+                "- 早盘资金流向与热门板块的启动迹象\n"
+                "- 使用「开盘后」「早盘初段」「截至发稿」等实时跟踪口吻\n"
+                "- 避免使用收盘总结性语言"
+            ),
+            "1200": (
+                "你正在撰写**午间复盘**报告。上午交易已结束，请聚焦：\n"
+                "- 上午走势回顾与关键转折点\n"
+                "- 下午可能的方向推演与关注点位\n"
+                "- 使用「上午」「午间」「午后关注」「下半场」等午间口吻\n"
+                "- **避免使用收盘总结性语言**（如「全天」「最终」「今日收报」）"
+            ),
+            "1430": (
+                "你正在撰写**尾盘追踪**报告。距收盘约 30 分钟，请聚焦：\n"
+                "- 下午走势与尾盘资金动向\n"
+                "- 收盘前的关键博弈与次日预判\n"
+                "- 使用「尾盘」「临近收盘」「下一交易日」等盘中偏尾段口吻\n"
+                "- 可以提及收盘预期，但避免确凿的收盘结论"
+            ),
+            "1800": (
+                "你正在撰写**全天收盘复盘**报告。市场已收盘，请聚焦：\n"
+                "- 全天走势完整回顾与关键节点分析\n"
+                "- 明日展望与操作建议\n"
+                "- 使用「今日」「全天」「最终收报」「明日关注」等收盘口吻"
+            ),
+        }
+        instr = guidance.get(ts, "")
+        if not instr:
+            return ""
+        return f"\n\n## 当前时段分析要求（最高优先级）\n\n{instr}\n"
 
     def _has_channel_config(self, config: Config) -> bool:
         """Check if multi-channel config (channels / YAML / legacy model_list) is active."""
