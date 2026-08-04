@@ -141,6 +141,9 @@ class TestFetcherSourceOptimization(unittest.TestCase):
             mock_longbridge.has_configured_credentials.return_value = False
             manager = DataFetcherManager()
 
+        # P1.6: LocalChipFetcher(P95) 是免凭证的本地筹码兜底源，
+        # 由 config.enable_local_chip_fallback（默认 True）控制，
+        # 不属于「未配置凭证需跳过」的 optional fetcher，故恒在列表末位。
         self.assertEqual(
             manager.available_fetchers,
             [
@@ -150,6 +153,7 @@ class TestFetcherSourceOptimization(unittest.TestCase):
                 "PytdxFetcher",
                 "BaostockFetcher",
                 "YfinanceFetcher",
+                "LocalChipFetcher",
             ],
         )
         mock_tushare.assert_not_called()

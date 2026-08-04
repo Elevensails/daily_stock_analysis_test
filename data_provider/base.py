@@ -1210,6 +1210,15 @@ class DataFetcherManager:
         else:
             logger.debug("[数据源初始化] 跳过未配置的 AlphaVantageFetcher")
 
+        # 本地筹码兜底源（P1.6）：东财筹码接口被封 + tushare 积分不足时的唯一出路。
+        # 只提供筹码能力（is_available_for_request 对 daily_data 等一律返回 False），
+        # priority=95 保证真实筹码源全部失败后才轮到它。函数内 import 避免模块级循环。
+        if getattr(config, "enable_local_chip_fallback", True):
+            from .local_chip_fetcher import LocalChipFetcher
+            optional_fetchers.append(LocalChipFetcher())
+        else:
+            logger.debug("[数据源初始化] 跳过已关闭的 LocalChipFetcher")
+
         # 初始化数据源列表
         self._ensure_concurrency_guards()
         with self._fetchers_lock:

@@ -1129,6 +1129,10 @@ class Config:
     enable_realtime_technical_indicators: bool = True
     # 筹码分布开关（该接口不稳定，云端部署建议关闭）
     enable_chip_distribution: bool = True
+    # 本地筹码兜底开关：东财筹码接口被封 / tushare 积分不足时，
+    # 用未被封的日 K 线在本地估算筹码分布（LocalChipFetcher，priority=95）。
+    # 关闭后该数据源不会被实例化，筹码链路回到「真实源全失败即无数据」。
+    enable_local_chip_fallback: bool = True
     # 东财接口补丁开关
     enable_eastmoney_patch: bool = False
     # 实时行情数据源优先级（逗号分隔）
@@ -2154,6 +2158,9 @@ class Config:
                 'ENABLE_REALTIME_TECHNICAL_INDICATORS', 'true'
             ).lower() == 'true',
             enable_chip_distribution=os.getenv('ENABLE_CHIP_DISTRIBUTION', 'true').lower() == 'true',
+            enable_local_chip_fallback=os.getenv(
+                'ENABLE_LOCAL_CHIP_FALLBACK', 'true'
+            ).lower() == 'true',
             # 东财接口补丁开关
             enable_eastmoney_patch=os.getenv('ENABLE_EASTMONEY_PATCH', 'false').lower() == 'true',
             # 实时行情数据源优先级：
