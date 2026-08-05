@@ -1298,6 +1298,18 @@ class Config:
     ltm_embed_timeout_seconds: float = 8.0                # embedding 调用超时（秒）
     ltm_max_candidates: int = 20000                       # 候选行数上界（内存护栏）
     ltm_recall_log_path: str = "logs/memory_recall.jsonl"  # 召回命中日志路径
+    # --- U12 语义缓存（LLM 结果缓存去重）组 ---
+    # 设计：roadmap/u12_semantic_cache_architecture.md §3.4
+    # 优先级：env SEM_CACHE_* ▶ config.yaml sem_cache.* ▶ 代码默认；
+    # 默认全关，开关关闭时主链路逐字节不变（不建连、不建表、不写日志）。
+    sem_cache_enabled: bool = False                       # 总开关（默认关闭）
+    sem_cache_mode: str = "exact"                         # exact / semantic（本版仅 exact 生效）
+    sem_cache_min_similarity: float = 0.95                # Tier-1 余弦阈值（本版未启用）
+    sem_cache_ttl_hours: int = 12                         # 缓存有效期（小时），0 = 永不过期
+    sem_cache_max_candidates: int = 64                    # 单分区候选上限（Tier-1 护栏）
+    sem_cache_min_response_chars: int = 200               # 低于此长度的响应不写缓存
+    sem_cache_store_prompt_text: bool = True              # 是否落 prompt 原文（排障用，可关）
+    sem_cache_log_path: str = "logs/semantic_cache.jsonl"  # 缓存命中埋点路径
 
     # --- Post-init validation ---------------------------------------------------
     _VALID_AGENT_ARCH = {"single", "multi"}
@@ -2453,6 +2465,52 @@ class Config:
                     'LTM_RECALL_LOG_PATH',
                     _yaml_get(yaml_cfg, ['ltm', 'recall_log_path'], 'logs/memory_recall.jsonl'),
                 ) or 'logs/memory_recall.jsonl'
+            ).strip(),
+            # U12 语义缓存组（设计 §3.4，8 字段）
+            sem_cache_enabled=parse_env_bool(
+                os.getenv('SEM_CACHE_ENABLED'),
+                default=bool(_yaml_get(yaml_cfg, ['sem_cache', 'enable'], False)),
+            ),
+            sem_cache_mode=str(
+                os.getenv(
+                    'SEM_CACHE_MODE',
+                    _yaml_get(yaml_cfg, ['sem_cache', 'mode'], 'exact'),
+                ) or 'exact'
+            ).strip().lower(),
+            sem_cache_min_similarity=parse_env_float(
+                os.getenv(
+                    'SEM_CACHE_MIN_SIMILARITY',
+                    _yaml_get(yaml_cfg, ['sem_cache', 'min_similarity'], 0.95),
+                ),
+                0.95, field_name='SEM_CACHE_MIN_SIMILARITY', minimum=-1.0, maximum=1.0,
+            ),
+            sem_cache_ttl_hours=parse_env_int(
+                os.getenv('SEM_CACHE_TTL_HOURS', _yaml_get(yaml_cfg, ['sem_cache', 'ttl_hours'], 12)),
+                12, field_name='SEM_CACHE_TTL_HOURS', minimum=0, maximum=8760,
+            ),
+            sem_cache_max_candidates=parse_env_int(
+                os.getenv(
+                    'SEM_CACHE_MAX_CANDIDATES',
+                    _yaml_get(yaml_cfg, ['sem_cache', 'max_candidates'], 64),
+                ),
+                64, field_name='SEM_CACHE_MAX_CANDIDATES', minimum=1, maximum=10000,
+            ),
+            sem_cache_min_response_chars=parse_env_int(
+                os.getenv(
+                    'SEM_CACHE_MIN_RESPONSE_CHARS',
+                    _yaml_get(yaml_cfg, ['sem_cache', 'min_response_chars'], 200),
+                ),
+                200, field_name='SEM_CACHE_MIN_RESPONSE_CHARS', minimum=0,
+            ),
+            sem_cache_store_prompt_text=parse_env_bool(
+                os.getenv('SEM_CACHE_STORE_PROMPT_TEXT'),
+                default=bool(_yaml_get(yaml_cfg, ['sem_cache', 'store_prompt_text'], True)),
+            ),
+            sem_cache_log_path=str(
+                os.getenv(
+                    'SEM_CACHE_LOG_PATH',
+                    _yaml_get(yaml_cfg, ['sem_cache', 'log_path'], 'logs/semantic_cache.jsonl'),
+                ) or 'logs/semantic_cache.jsonl'
             ).strip(),
         )
         apply_proxy_settings(cfg)
@@ -3814,6 +3872,40 @@ class Config:
                 ),
                 field="LTM_EMBEDDING_PROVIDER",
                 code="u14_ltm_litellm_without_key",
+            ))
+
+        # --- U12 语义缓存 ---------------------------------------------------
+        _sem_cache_valid_modes = {"exact", "semantic"}
+        if self.sem_cache_mode not in _sem_cache_valid_modes:
+            issues.append(ConfigIssue(
+                severity="error",
+                message=(
+                    f"SEM_CACHE_MODE={self.sem_cache_mode!r} 非法，"
+                    f"支持：{'、'.join(sorted(_sem_cache_valid_modes))}。"
+                ),
+                field="SEM_CACHE_MODE",
+                code="u12_sem_cache_mode",
+            ))
+        if self.sem_cache_enabled and self.sem_cache_mode == "semantic":
+            issues.append(ConfigIssue(
+                severity="warning",
+                message=(
+                    "SEM_CACHE_MODE=semantic 在当前版本尚未开放（Tier-1 语义命中总闸 "
+                    "src/cache/semantic_cache.py::SEMANTIC_TIER_ENABLED=False），"
+                    "运行时将自动按 exact 精确匹配工作，不会产生语义近似命中。"
+                ),
+                field="SEM_CACHE_MODE",
+                code="u12_sem_cache_semantic_not_ready",
+            ))
+        if self.sem_cache_enabled and self.sem_cache_ttl_hours == 0:
+            issues.append(ConfigIssue(
+                severity="warning",
+                message=(
+                    "SEM_CACHE_TTL_HOURS=0 表示缓存永不过期。分析结论具有强时效性，"
+                    "建议设为 12（当日有效）以内，否则需自行调度 scripts/semcache_admin.py --purge。"
+                ),
+                field="SEM_CACHE_TTL_HOURS",
+                code="u12_sem_cache_no_ttl",
             ))
 
         return issues

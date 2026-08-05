@@ -3058,6 +3058,91 @@ class GeminiAnalyzer:
             litellm_completion_callable=self._call_litellm_impl,
         )
 
+    def _resolve_semantic_cache(
+        self,
+        prompt: str,
+        generation_config: dict,
+        *,
+        system_prompt: Optional[str] = None,
+        cache_context: Optional[Dict[str, Any]] = None,
+        backend_id: str = "",
+    ) -> Tuple[Any, Any]:
+        """U12: resolve the semantic cache facade and the partition key.
+
+        Returns ``(None, None)`` whenever caching must not happen — no
+        ``cache_context`` supplied (the caller opted out), the feature switch is
+        off, the partition key is incomplete, or anything raised.  Callers treat
+        that exactly like "cache miss", so the main path is never blocked.
+        """
+        if not cache_context:
+            # 未显式传入缓存上下文 = 调用方未声明分区语义（如 generate_text 的
+            # 通用文本生成）。缺少 trade_date / time_slot 就无法保证铁律 #1，
+            # 因此**默认不缓存**，而不是猜一个分区。
+            return None, None
+        try:
+            from src.cache import build_semantic_cache  # noqa: PLC0415 —— 惰性导入
+
+            cache = build_semantic_cache(self._get_runtime_config())
+            if not cache.enabled:
+                return None, None
+            key = cache.build_key(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                context=cache_context,
+                generation_config=generation_config,
+                backend_id=str(cache_context.get("backend_id") or backend_id or ""),
+            )
+            if key is None:
+                return None, None
+            return cache, key
+        except Exception as exc:
+            logger.debug("[U12] 缓存初始化失败，本次调用跳过缓存: %s", exc)
+            return None, None
+
+    def _consume_cache_hit(
+        self,
+        semantic_cache: Any,
+        cache_key: Any,
+        prompt: str,
+        *,
+        system_prompt: Optional[str] = None,
+        response_validator: Optional[Callable[[str], None]] = None,
+        stream: bool = False,
+        stream_progress_callback: Optional[Callable[[int], None]] = None,
+    ) -> Optional[Tuple[str, str, Dict[str, Any]]]:
+        """U12: try to serve this call from cache.
+
+        Returns the ``(text, model, usage)`` triple on a usable hit, otherwise
+        ``None`` (caller falls through to the real LLM call).
+        """
+        try:
+            hit = semantic_cache.get(cache_key, prompt, system_prompt=system_prompt)
+        except Exception as exc:  # pragma: no cover —— 门面层已 fail-open
+            logger.debug("[U12] 缓存查询异常，按未命中处理: %s", exc)
+            return None
+        if hit is None:
+            return None
+
+        # 缓存文本必须与实时响应走**同一道**校验。跳过校验等于让一条曾经侥幸
+        # 落库的坏 JSON 在 TTL 内反复毒害下游解析。
+        if response_validator is not None:
+            try:
+                response_validator(hit.response_text)
+            except Exception as exc:
+                logger.warning("[U12] 缓存命中未通过响应校验，已丢弃并走实时调用: %s", exc)
+                return None
+
+        # 流式调用方靠回调推进进度条；命中时没有真实流，一次性补一个总字符数，
+        # 否则进度条会停在"等待响应"。
+        if stream and stream_progress_callback is not None:
+            try:
+                stream_progress_callback(len(hit.response_text or ""))
+            except Exception as exc:
+                logger.debug("[U12] 缓存命中的进度回调失败（忽略）: %s", exc)
+
+        model_used = hit.response_model or getattr(cache_key, "llm_model", "") or ""
+        return hit.response_text, model_used, hit.as_usage_payload()
+
     def _call_litellm(
         self,
         prompt: str,
@@ -3068,12 +3153,41 @@ class GeminiAnalyzer:
         stream_progress_callback: Optional[Callable[[int], None]] = None,
         response_validator: Optional[Callable[[str], None]] = None,
         audit_context: Optional[Dict[str, Any]] = None,
+        cache_context: Optional[Dict[str, Any]] = None,
     ) -> Tuple[str, str, Dict[str, Any]]:
-        """Compatibility wrapper around the configured generation backend."""
+        """Compatibility wrapper around the configured generation backend.
+
+        U12: when ``cache_context`` is provided *and* the semantic cache is
+        enabled, an exact-match hit short-circuits the backend call entirely and
+        returns zero-token usage tagged with ``cache_hit=True``.  Everything
+        about the original code path is unchanged when the cache is off.
+        """
         preflight_error = self.get_generation_backend_config_error()
         if preflight_error is not None and not self._can_use_generation_fallback(preflight_error):
             raise preflight_error
         backend_id, fallback_backend_id = self._resolve_generation_backend_config()
+
+        # --- U12 查缓存前置 ------------------------------------------------
+        semantic_cache, cache_key = self._resolve_semantic_cache(
+            prompt,
+            generation_config,
+            system_prompt=system_prompt,
+            cache_context=cache_context,
+            backend_id=backend_id,
+        )
+        if semantic_cache is not None and cache_key is not None:
+            cached = self._consume_cache_hit(
+                semantic_cache,
+                cache_key,
+                prompt,
+                system_prompt=system_prompt,
+                response_validator=response_validator,
+                stream=stream,
+                stream_progress_callback=stream_progress_callback,
+            )
+            if cached is not None:
+                return cached
+
         try:
             result = self._get_generation_backend(backend_id).generate(
                 prompt,
@@ -3166,6 +3280,17 @@ class GeminiAnalyzer:
                         "fallback_error": str(fallback_exc),
                     },
                 ) from fallback_exc
+
+        # --- U12 写回缓存（fail-open：写失败只影响下次命中率，不影响本次结果）--
+        if semantic_cache is not None and cache_key is not None:
+            semantic_cache.put(
+                cache_key,
+                prompt,
+                result.text,
+                system_prompt=system_prompt,
+                response_model=result.model,
+                usage=result.usage,
+            )
         return result.text, result.model, result.usage
 
     def _call_litellm_impl(
@@ -3641,6 +3766,19 @@ class GeminiAnalyzer:
                 "max_output_tokens": config.max_output_tokens,
             }
 
+            # U12 缓存分区上下文。这里是**唯一**声明"本次调用可缓存"的地方 ——
+            # trade_date 取当日行情日期、time_slot 取运行时段，二者共同保证
+            # 铁律 #1：早盘结论不会在盘后被复用，昨日结论不会在今日被复用。
+            # 任一维度取不到（如 context 无 date）时 build_key 会判残缺并整体跳过缓存。
+            semantic_cache_context = {
+                "code": code,
+                "trade_date": context.get('date', ''),
+                "time_slot": getattr(config, 'time_slot_default', '') or '',
+                "report_type": "stock_analysis",
+                "llm_model": model_name,
+                "backend_id": backend_id,
+            }
+
             logger.info(f"[LLM调用] 开始调用 {model_name}...")
             _emit_progress(68, f"{name}：LLM 已接收请求，等待响应")
 
@@ -3660,6 +3798,7 @@ class GeminiAnalyzer:
                         stream_progress_callback=stream_progress_callback,
                         response_validator=self._validate_json_response,
                         audit_context=legacy_audit_context,
+                        cache_context=semantic_cache_context,
                     )
                 except _AllModelsFailedError as exc:
                     if exc.last_response_text is not None:

@@ -233,11 +233,36 @@ def has_provider_usage_payload(usage: Mapping[str, Any] | None) -> bool:
     return _provider_usage_json_has_count_signal(usage.get("provider_usage_json"))
 
 
-def should_persist_usage_telemetry(usage: Mapping[str, Any] | None) -> bool:
-    """Return whether usage should be persisted as provider telemetry."""
+def is_semantic_cache_hit(usage: Mapping[str, Any] | None) -> bool:
+    """Return whether usage describes a U12 semantic-cache hit.
+
+    A cache hit legitimately reports ``prompt/completion/total_tokens == 0``
+    because no provider call happened.  It is *not* a missing-usage bug, so it
+    must be distinguishable from "provider forgot to report usage".
+    """
     if not usage:
         return False
-    return has_provider_usage_payload(usage) or usage.get("cache_observation") == "invalid_provider_usage"
+    return usage.get("cache_hit") is True
+
+
+def should_persist_usage_telemetry(usage: Mapping[str, Any] | None) -> bool:
+    """Return whether usage should be persisted as provider telemetry.
+
+    U12 note: semantic-cache hits carry all-zero token counts by design (see
+    ``src/cache/models.py::CacheHit.as_usage_payload``).  Without the explicit
+    ``cache_hit`` branch below they would fail ``has_provider_usage_payload``
+    and be silently dropped, making cache hit-rate unobservable in the usage
+    telemetry.  Fabricating token counts to work around this was rejected —
+    it would corrupt cost reporting.  Existing callers never set
+    ``cache_hit=True``, so this branch is additive and behavior-preserving.
+    """
+    if not usage:
+        return False
+    return (
+        has_provider_usage_payload(usage)
+        or usage.get("cache_observation") == "invalid_provider_usage"
+        or is_semantic_cache_hit(usage)
+    )
 
 
 def _provider_usage_json_has_count_signal(provider_usage_json: Any) -> bool:

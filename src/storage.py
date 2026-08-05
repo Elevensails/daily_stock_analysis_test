@@ -448,6 +448,110 @@ class AnalysisMemoryVector(Base):
         }
 
 
+class LlmSemanticCache(Base):
+    """U12 LLM 结果语义缓存表（设计 §3.3）。
+
+    每行 = 一次 LLM 调用的「分区键 + prompt 指纹 → 响应文本」映射。
+
+    **与 AnalysisMemoryVector 物理隔离（U12 铁律 #4）**：两张表用途正交 ——
+    前者是「历史结论的语义召回」，后者是「本次调用的结果复用」。混用会让
+    召回污染缓存、缓存污染召回，因此宁可多一张表也绝不复用。
+
+    分区维度（七元组，任一不同 ⇒ ``partition_key`` 不同 ⇒ 物理不可互相命中）::
+
+        code | trade_date | time_slot | report_type | llm_model | backend_id | params_fp
+
+    其中 ``trade_date`` / ``time_slot`` 是 U12 铁律 #1「严禁跨时槽、跨交易日
+    命中」的载体：早盘 09:30 的分析结论绝不允许在盘后 18:00 被复用，
+    昨天的结论也绝不允许今天被复用 —— 那是**给出错误的投资建议**，
+    比缓存不命中严重几个数量级。
+
+    三层防御中的第 1 层（写入侧 ``partition_key``）由
+    ``src/cache/models.py::CacheKey.partition_key()`` 计算；
+    第 2 层（SQL 等值强过滤）与第 3 层（Python 断言）在
+    ``src/cache/cache_store.py``。本表负责把七个维度**逐列冗余落盘**，
+    让第 2 / 3 层有可比对的字段 —— 这些列在数学上对 ``partition_key`` 冗余，
+    但它们兜的是「我们自己拼 key 的代码写错了」这一现实得多的风险。
+
+    建表依赖 ``Base.metadata.create_all()``，无需 migration 脚本。
+    """
+
+    __tablename__ = 'llm_semantic_cache'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # 分区指纹 = sha256(七维 | 命名空间 | 向量版本)
+    partition_key = Column(String(64), nullable=False, index=True)
+
+    # 七个分区维度（逐列冗余，供第 2/3 层防御比对）
+    code = Column(String(16), nullable=False, index=True)
+    trade_date = Column(String(10), nullable=False, index=True)   # YYYY-MM-DD
+    time_slot = Column(String(4), nullable=False, index=True)     # HHMM
+    report_type = Column(String(16), nullable=False, default='daily')
+    llm_model = Column(String(128), nullable=False, default='')
+    backend_id = Column(String(32), nullable=False, default='')
+    params_fp = Column(String(32), nullable=False, default='')    # 生成参数指纹
+
+    # 内容指纹与正文
+    prompt_hash = Column(String(64), nullable=False, index=True)  # sha256(规范化 prompt)
+    prompt_text = Column(Text)                                    # 可关（sem_cache.store_prompt_text）
+    response_text = Column(Text, nullable=False)
+    response_model = Column(String(128), default='')
+    usage_json = Column(Text)                                     # 原始 usage 快照（成本回放用）
+
+    # 向量本体（Tier-0 用不到，为未来 Tier-1 预留；落盘前已 L2 归一化）
+    embedding = Column(LargeBinary)
+    dim = Column(Integer, default=0)
+
+    # 版本治理：查询恒带 (model_id, vector_version) 双过滤
+    model_id = Column(String(64), nullable=False, default='local:semcache-v1', index=True)
+    vector_version = Column(Integer, nullable=False, default=1, index=True)
+
+    # 生命周期与统计
+    created_at = Column(DateTime, default=datetime.now, index=True)
+    expires_at = Column(DateTime, index=True)                     # NULL = 永不过期
+    hit_count = Column(Integer, nullable=False, default=0)
+    last_hit_at = Column(DateTime)
+
+    __table_args__ = (
+        # 幂等写入的冲突键，与 cache_store.upsert() 的 index_elements 严格一致
+        UniqueConstraint(
+            'partition_key', 'prompt_hash', 'model_id', 'vector_version',
+            name='uq_semcache_partition_prompt',
+        ),
+        Index('ix_semcache_lookup', 'partition_key', 'prompt_hash'),
+        Index('ix_semcache_scope', 'code', 'trade_date', 'time_slot'),
+        Index('ix_semcache_model_version', 'model_id', 'vector_version'),
+        Index('ix_semcache_expiry', 'expires_at'),
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典（不含 prompt 原文与向量本体，避免日志泄漏长文/敏感内容）。"""
+        return {
+            'id': self.id,
+            'partition_key': self.partition_key,
+            'code': self.code,
+            'trade_date': self.trade_date,
+            'time_slot': self.time_slot,
+            'report_type': self.report_type,
+            'llm_model': self.llm_model,
+            'backend_id': self.backend_id,
+            'params_fp': self.params_fp,
+            'prompt_hash': self.prompt_hash,
+            'prompt_chars': len(self.prompt_text or ''),
+            'response_chars': len(self.response_text or ''),
+            'response_model': self.response_model,
+            'embedding_bytes': len(self.embedding) if self.embedding else 0,
+            'dim': self.dim,
+            'model_id': self.model_id,
+            'vector_version': self.vector_version,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'expires_at': self.expires_at.isoformat() if self.expires_at else None,
+            'hit_count': self.hit_count,
+            'last_hit_at': self.last_hit_at.isoformat() if self.last_hit_at else None,
+        }
+
+
 class BacktestResult(Base):
     """单条分析记录的回测结果。"""
 

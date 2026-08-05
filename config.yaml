@@ -163,6 +163,47 @@ ltm:
   recall_log_path: "logs/memory_recall.jsonl"
 
 # ---------------------------------------------------------------------
+# sem_cache：U12 LLM 结果缓存去重
+# ---------------------------------------------------------------------
+# 命中条件（本版 = Tier-0 精确匹配）：
+#   prompt 逐字节一致（空白归一后）  且
+#   七个分区维度完全一致：code / trade_date / time_slot / report_type
+#                        / llm_model / backend_id / 生成参数指纹
+#
+# 铁律 #1：**严禁跨时槽、跨交易日命中**。09:30 早盘的结论绝不允许在 18:00
+# 盘后被复用，昨天的结论也绝不允许今天被复用 —— 那是给出错误的投资建议，
+# 比缓存不命中严重几个数量级。为此实现了三层防御（分区键 sha256 + SQL 等值
+# 强过滤 + Python 逐字段断言），任一层拦下即视为未命中。
+#
+# 对应 env：SEM_CACHE_ENABLED / SEM_CACHE_MODE / SEM_CACHE_MIN_SIMILARITY /
+#          SEM_CACHE_TTL_HOURS / SEM_CACHE_MAX_CANDIDATES /
+#          SEM_CACHE_MIN_RESPONSE_CHARS / SEM_CACHE_STORE_PROMPT_TEXT /
+#          SEM_CACHE_LOG_PATH
+sem_cache:
+  # 缓存总开关。false = 主链路逐字节不变（不建连、不建表、不写埋点）。
+  # 首版默认关闭：需在真实环境观察一轮命中率与分区拒绝数后再开。
+  enable: false
+  # 命中模式：
+  #   exact    — Tier-0 精确匹配（prompt 逐字节一致），本版唯一生效的模式
+  #   semantic — Tier-1 语义近似，**本版未开放**，配置了也会自动按 exact 运行
+  mode: "exact"
+  # Tier-1 余弦相似度阈值（本版未启用，仅为将来预留）。
+  # 阈值定得高（0.95）是刻意的：缓存误命中 = 直接给错建议，宁缺毋滥。
+  min_similarity: 0.95
+  # 缓存有效期（小时）。12 = 当日有效，跨日自然失效，与 A 股交易节奏对齐。
+  # 0 = 永不过期（不建议，需自行调度清理）。
+  ttl_hours: 12
+  # 单分区候选行数上限（Tier-1 护栏）。分区天然极小，64 已远超实际需要。
+  max_candidates: 64
+  # 低于此字符数的响应不写缓存 —— 挡住空响应与 429/5xx 错误文案被缓存 12 小时。
+  min_response_chars: 200
+  # 是否落 prompt 原文（便于排障复现）。介意库体积或内容敏感时置 false，
+  # 置 false 后仍保留 prompt_hash，不影响命中判定。
+  store_prompt_text: true
+  # 缓存埋点路径（jsonl，每次 get/put 一条；只记 prompt 的 hash 与长度，不记原文）。
+  log_path: "logs/semantic_cache.jsonl"
+
+# ---------------------------------------------------------------------
 # chip：P1.6 筹码数据反爬策略（CI 探测落到 B 分支）
 # ---------------------------------------------------------------------
 # 实证背景：GitHub Actions 上 ak.stock_cyq_em() 抛 RemoteDisconnected，
